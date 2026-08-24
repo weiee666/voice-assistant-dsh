@@ -2,6 +2,7 @@
 
 import type { ServerResponse } from 'node:http'
 import type { IncomingMessage } from 'node:http'
+import { createHmac, randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -54,6 +55,11 @@ interface TelegramUpdate {
   }
 }
 
+interface AliyunNlsToken {
+  readonly id: string
+  readonly expireTime: number
+}
+
 /** Voice service settings owned by the assistant deployment. */
 export interface Config extends AssistantSettings {}
 
@@ -71,6 +77,10 @@ export const Config: z<Config> = z.object({
   minimaxVoice: z.string().default('male-qn-qingse'),
   minimaxFormat: z.string().default('mp3'),
   aliyunNlsTokenEnv: z.string().role('credential-ref').default('ALIYUN_NLS_TOKEN'),
+  aliyunAccessKeyIdEnv: z.string().role('credential-ref').default('ALIYUN_AK_ID'),
+  aliyunAccessKeySecretEnv: z.string().role('credential-ref').default('ALIYUN_AK_SECRET'),
+  aliyunTokenRegionId: z.string().default('ap-southeast-1'),
+  aliyunTokenURL: z.string().default('https://nlsmeta.ap-southeast-1.aliyuncs.com/'),
   aliyunNlsAppKey: z.string().default(''),
   aliyunAsrURL: z.string().default('https://nls-gateway-ap-southeast-1.aliyuncs.com/stream/v1/asr'),
   aliyunAsrFormat: z.string().default('pcm'),
@@ -214,6 +224,41 @@ export async function createAliyunAsrTranscript(
   })
 }
 
+/** Create an Aliyun NLS token with POP OpenAPI signing.
+ * @param accessKeyId - Aliyun AccessKey ID.
+ * @param accessKeySecret - Aliyun AccessKey Secret.
+ * @param config - validated Aliyun token settings.
+ * @param fetcher - HTTP implementation, replaceable by focused tests.
+ * @returns the temporary NLS token and expiry.
+ */
+export async function createAliyunNlsToken(
+  accessKeyId: string,
+  accessKeySecret: string,
+  config: Config,
+  fetcher: typeof fetch = fetch,
+): Promise<AliyunNlsToken> {
+  const parameters: Record<string, string> = {
+    AccessKeyId: accessKeyId,
+    Action: 'CreateToken',
+    Format: 'JSON',
+    RegionId: config.aliyunTokenRegionId,
+    SignatureMethod: 'HMAC-SHA1',
+    SignatureNonce: randomUUID(),
+    SignatureVersion: '1.0',
+    Timestamp: new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z'),
+    Version: '2019-02-28',
+  }
+  const canonical = canonicalQuery(parameters)
+  const stringToSign = `GET&%2F&${percentEncode(canonical)}`
+  parameters.Signature = createHmac('sha1', `${accessKeySecret}&`).update(stringToSign).digest('base64')
+  const url = new URL(config.aliyunTokenURL)
+  for (const [key, value] of Object.entries(parameters)) url.searchParams.set(key, value)
+  const response = await fetcher(url)
+  const body = await response.text()
+  if (!response.ok) throw new Error(body.trim() || `Aliyun CreateToken failed (${String(response.status)})`)
+  return readAliyunToken(body)
+}
+
 function readClientSecret(body: string): string | undefined {
   try {
     const parsed = JSON.parse(body) as { readonly value?: unknown }
@@ -254,6 +299,30 @@ function contentTypeForAudioFormat(format: string): string {
     case 'pcm': return 'audio/L16'
     default: return 'application/octet-stream'
   }
+}
+
+function percentEncode(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/\+/gu, '%20')
+    .replace(/\*/gu, '%2A')
+    .replace(/%7E/gu, '~')
+}
+
+function canonicalQuery(parameters: Readonly<Record<string, string>>): string {
+  return Object.keys(parameters)
+    .sort()
+    .map(key => `${percentEncode(key)}=${percentEncode(parameters[key] ?? '')}`)
+    .join('&')
+}
+
+function readAliyunToken(body: string): AliyunNlsToken {
+  const parsed = JSON.parse(body) as { readonly Token?: { readonly Id?: unknown; readonly ExpireTime?: unknown } }
+  const id = parsed.Token?.Id
+  const expireTime = parsed.Token?.ExpireTime
+  if (typeof id !== 'string' || id === '' || typeof expireTime !== 'number') {
+    throw new Error('Aliyun CreateToken returned an invalid token response')
+  }
+  return { id, expireTime }
 }
 
 function bodyBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -396,21 +465,25 @@ async function createSecretarySpeech(ctx: Context, text: string, config: Config)
   return createMiniMaxSpeech(credential.value, text, config)
 }
 
-async function createSecretaryAsr(ctx: Context, audio: Uint8Array, config: Config): Promise<Response> {
+async function createSecretaryAsr(
+  audio: Uint8Array,
+  config: Config,
+  readToken: (config: Config) => Promise<string | undefined>,
+): Promise<Response> {
   if (config.aliyunNlsAppKey.trim() === '') {
     return new Response(JSON.stringify({ error: 'Aliyun NLS AppKey is not configured' }), {
       status: 503,
       headers: { 'content-type': 'application/json; charset=utf-8' },
     })
   }
-  const credential = await ctx.credentials.resolve(credentialRef(config.aliyunNlsTokenEnv))
-  if (credential === undefined) {
-    return new Response(JSON.stringify({ error: `${config.aliyunNlsTokenEnv} is not configured` }), {
+  const token = await readToken(config)
+  if (token === undefined) {
+    return new Response(JSON.stringify({ error: 'Aliyun AccessKey or NLS Token is not configured' }), {
       status: 503,
       headers: { 'content-type': 'application/json; charset=utf-8' },
     })
   }
-  return createAliyunAsrTranscript(credential.value, audio, config)
+  return createAliyunAsrTranscript(token, audio, config)
 }
 
 /** Register the voice service routes.
@@ -422,6 +495,18 @@ export function apply(ctx: Context, config: Config): void {
   const bridge = createBridgeStore()
   let telegramOffset = 0
   let telegramPolling = false
+  let aliyunTokenCache: AliyunNlsToken | undefined
+  const readAliyunNlsToken = async (settings: Config): Promise<string | undefined> => {
+    const nowSeconds = Math.floor(Date.now() / 1000)
+    if (aliyunTokenCache !== undefined && aliyunTokenCache.expireTime - nowSeconds > 300) return aliyunTokenCache.id
+    const accessKeyId = await resolveOptionalCredential(ctx, settings.aliyunAccessKeyIdEnv)
+    const accessKeySecret = await resolveOptionalCredential(ctx, settings.aliyunAccessKeySecretEnv)
+    if (accessKeyId !== undefined && accessKeySecret !== undefined) {
+      aliyunTokenCache = await createAliyunNlsToken(accessKeyId, accessKeySecret, settings)
+      return aliyunTokenCache.id
+    }
+    return resolveOptionalCredential(ctx, settings.aliyunNlsTokenEnv)
+  }
   installSettingsSection(
     ctx,
     settingsNamespace(A2A_ASSISTANT_SETTINGS_NAMESPACE),
@@ -604,7 +689,7 @@ export function apply(ctx: Context, config: Config): void {
         answer(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Audio is required and must be at most 2MB' }))
         return
       }
-      const asrResponse = await createSecretaryAsr(ctx, audio, current())
+      const asrResponse = await createSecretaryAsr(audio, current(), readAliyunNlsToken)
       const body = await asrResponse.text()
       answer(res, asrResponse.status, asrResponse.headers.get('content-type') ?? 'application/json; charset=utf-8', body)
     },

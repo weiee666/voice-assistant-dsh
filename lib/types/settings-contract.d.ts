@@ -29,6 +29,14 @@ export interface AssistantSettings {
     minimaxFormat: string;
     /** Credential reference resolved for Aliyun short-sentence ASR requests. */
     aliyunNlsTokenEnv: string;
+    /** Credential reference resolved for Aliyun OpenAPI AccessKey ID. */
+    aliyunAccessKeyIdEnv: string;
+    /** Credential reference resolved for Aliyun OpenAPI AccessKey Secret. */
+    aliyunAccessKeySecretEnv: string;
+    /** Aliyun OpenAPI region used to mint NLS tokens. */
+    aliyunTokenRegionId: string;
+    /** Aliyun OpenAPI endpoint used to mint NLS tokens. */
+    aliyunTokenURL: string;
     /** Aliyun Intelligent Speech Interaction project AppKey. */
     aliyunNlsAppKey: string;
     /** Aliyun short-sentence ASR endpoint. */

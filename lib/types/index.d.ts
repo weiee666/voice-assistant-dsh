@@ -6,6 +6,10 @@ import { type AssistantSettings } from './settings-contract.ts';
 export declare const name = "client-ui-a2a-assistant";
 /** Host services needed to create a secret-backed Realtime call. */
 export declare const inject: string[];
+interface AliyunNlsToken {
+    readonly id: string;
+    readonly expireTime: number;
+}
 /** Voice service settings owned by the assistant deployment. */
 export interface Config extends AssistantSettings {
 }
@@ -33,9 +37,18 @@ export declare function createMiniMaxSpeech(apiKey: string, text: string, config
  * @returns the Aliyun ASR response.
  */
 export declare function createAliyunAsrTranscript(token: string, audio: Uint8Array, config: Config, fetcher?: typeof fetch): Promise<Response>;
+/** Create an Aliyun NLS token with POP OpenAPI signing.
+ * @param accessKeyId - Aliyun AccessKey ID.
+ * @param accessKeySecret - Aliyun AccessKey Secret.
+ * @param config - validated Aliyun token settings.
+ * @param fetcher - HTTP implementation, replaceable by focused tests.
+ * @returns the temporary NLS token and expiry.
+ */
+export declare function createAliyunNlsToken(accessKeyId: string, accessKeySecret: string, config: Config, fetcher?: typeof fetch): Promise<AliyunNlsToken>;
 /** Register the voice service routes.
  * @param ctx - host context carrying credentials and the Web route registry.
  * @param config - validated voice settings.
  */
 export declare function apply(ctx: Context, config: Config): void;
+export {};
 //# sourceMappingURL=index.d.ts.map

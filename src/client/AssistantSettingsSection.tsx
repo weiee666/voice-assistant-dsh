@@ -26,6 +26,8 @@ interface Draft {
   readonly key: string
   readonly minimaxKey: string
   readonly aliyunToken: string
+  readonly aliyunAccessKeyId: string
+  readonly aliyunAccessKeySecret: string
   readonly telegramKey: string
   readonly model: string
   readonly voice: string
@@ -38,6 +40,10 @@ interface Draft {
   readonly minimaxVoice: string
   readonly minimaxFormat: string
   readonly aliyunNlsTokenEnv: string
+  readonly aliyunAccessKeyIdEnv: string
+  readonly aliyunAccessKeySecretEnv: string
+  readonly aliyunTokenRegionId: string
+  readonly aliyunTokenURL: string
   readonly aliyunNlsAppKey: string
   readonly aliyunAsrURL: string
   readonly aliyunAsrFormat: string
@@ -50,9 +56,10 @@ interface Draft {
 }
 
 const EMPTY_DRAFT: Draft = {
-  key: '', minimaxKey: '', aliyunToken: '', telegramKey: '', model: '', voice: '', transcriptionModel: '', instructions: '', voiceSilenceMs: '',
+  key: '', minimaxKey: '', aliyunToken: '', aliyunAccessKeyId: '', aliyunAccessKeySecret: '', telegramKey: '', model: '', voice: '', transcriptionModel: '', instructions: '', voiceSilenceMs: '',
   minimaxApiKeyEnv: '', minimaxBaseURL: '', minimaxModel: '', minimaxVoice: '', minimaxFormat: '',
-  aliyunNlsTokenEnv: '', aliyunNlsAppKey: '', aliyunAsrURL: '', aliyunAsrFormat: '', aliyunAsrSampleRate: '',
+  aliyunNlsTokenEnv: '', aliyunAccessKeyIdEnv: '', aliyunAccessKeySecretEnv: '', aliyunTokenRegionId: '', aliyunTokenURL: '',
+  aliyunNlsAppKey: '', aliyunAsrURL: '', aliyunAsrFormat: '', aliyunAsrSampleRate: '',
   publicDashboardUrl: '', bridgeDeviceName: '', bridgePollIntervalMs: '', telegramBotTokenEnv: '',
   telegramAllowedUserIds: '',
 }
@@ -73,15 +80,20 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
   const credentialRef = current?.apiKeyEnv ?? 'OPENAI_API_KEY'
   const minimaxCredentialRef = current?.minimaxApiKeyEnv ?? 'MINIMAX_API_KEY'
   const aliyunCredentialRef = current?.aliyunNlsTokenEnv ?? 'ALIYUN_NLS_TOKEN'
+  const aliyunAccessKeyIdRef = current?.aliyunAccessKeyIdEnv ?? 'ALIYUN_AK_ID'
+  const aliyunAccessKeySecretRef = current?.aliyunAccessKeySecretEnv ?? 'ALIYUN_AK_SECRET'
   const telegramCredentialRef = current?.telegramBotTokenEnv ?? 'TELEGRAM_BOT_TOKEN'
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [configured, setConfigured] = useState(false)
   const [minimaxConfigured, setMinimaxConfigured] = useState(false)
   const [aliyunConfigured, setAliyunConfigured] = useState(false)
+  const [aliyunAccessKeyConfigured, setAliyunAccessKeyConfigured] = useState(false)
   const [telegramConfigured, setTelegramConfigured] = useState(false)
   const [credentialWritable, setCredentialWritable] = useState(true)
   const [minimaxCredentialWritable, setMinimaxCredentialWritable] = useState(true)
   const [aliyunCredentialWritable, setAliyunCredentialWritable] = useState(true)
+  const [aliyunAccessKeyIdWritable, setAliyunAccessKeyIdWritable] = useState(true)
+  const [aliyunAccessKeySecretWritable, setAliyunAccessKeySecretWritable] = useState(true)
   const [telegramCredentialWritable, setTelegramCredentialWritable] = useState(true)
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -93,6 +105,8 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
       key: '',
       minimaxKey: '',
       aliyunToken: '',
+      aliyunAccessKeyId: '',
+      aliyunAccessKeySecret: '',
       telegramKey: '',
       model: current.model,
       voice: current.voice,
@@ -105,6 +119,10 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
       minimaxVoice: current.minimaxVoice,
       minimaxFormat: current.minimaxFormat,
       aliyunNlsTokenEnv: current.aliyunNlsTokenEnv,
+      aliyunAccessKeyIdEnv: current.aliyunAccessKeyIdEnv,
+      aliyunAccessKeySecretEnv: current.aliyunAccessKeySecretEnv,
+      aliyunTokenRegionId: current.aliyunTokenRegionId,
+      aliyunTokenURL: current.aliyunTokenURL,
       aliyunNlsAppKey: current.aliyunNlsAppKey,
       aliyunAsrURL: current.aliyunAsrURL,
       aliyunAsrFormat: current.aliyunAsrFormat,
@@ -119,11 +137,13 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
 
   useEffect(() => {
     let active = true
-    void api.credentials.describe({ refs: [credentialRef, minimaxCredentialRef, aliyunCredentialRef, telegramCredentialRef] }).then((response) => {
+    void api.credentials.describe({ refs: [credentialRef, minimaxCredentialRef, aliyunCredentialRef, aliyunAccessKeyIdRef, aliyunAccessKeySecretRef, telegramCredentialRef] }).then((response) => {
       if (!active || !response.result.ok) return
       const openaiView = response.result.value.credentials[credentialRef]
       const minimaxView = response.result.value.credentials[minimaxCredentialRef]
       const aliyunView = response.result.value.credentials[aliyunCredentialRef]
+      const aliyunAccessKeyIdView = response.result.value.credentials[aliyunAccessKeyIdRef]
+      const aliyunAccessKeySecretView = response.result.value.credentials[aliyunAccessKeySecretRef]
       const telegramView = response.result.value.credentials[telegramCredentialRef]
       setConfigured(openaiView?.configured ?? false)
       setCredentialWritable(openaiView?.writable ?? true)
@@ -131,11 +151,14 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
       setMinimaxCredentialWritable(minimaxView?.writable ?? true)
       setAliyunConfigured(aliyunView?.configured ?? false)
       setAliyunCredentialWritable(aliyunView?.writable ?? true)
+      setAliyunAccessKeyConfigured((aliyunAccessKeyIdView?.configured ?? false) && (aliyunAccessKeySecretView?.configured ?? false))
+      setAliyunAccessKeyIdWritable(aliyunAccessKeyIdView?.writable ?? true)
+      setAliyunAccessKeySecretWritable(aliyunAccessKeySecretView?.writable ?? true)
       setTelegramConfigured(telegramView?.configured ?? false)
       setTelegramCredentialWritable(telegramView?.writable ?? true)
     }).catch(() => {})
     return () => { active = false }
-  }, [api, credentialRef, minimaxCredentialRef, aliyunCredentialRef, telegramCredentialRef])
+  }, [api, credentialRef, minimaxCredentialRef, aliyunCredentialRef, aliyunAccessKeyIdRef, aliyunAccessKeySecretRef, telegramCredentialRef])
 
   const edit = (field: keyof Draft, value: string): void => {
     setDraft(previous => ({ ...previous, [field]: value }))
@@ -166,6 +189,17 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
         if (!response.result.ok) throw new Error(response.result.error.message)
         setAliyunConfigured(true)
       }
+      const aliyunAccessKeyId = draft.aliyunAccessKeyId.trim()
+      if (aliyunAccessKeyId !== '') {
+        const response = await api.credentials.set({ ref: draft.aliyunAccessKeyIdEnv.trim(), value: aliyunAccessKeyId })
+        if (!response.result.ok) throw new Error(response.result.error.message)
+      }
+      const aliyunAccessKeySecret = draft.aliyunAccessKeySecret.trim()
+      if (aliyunAccessKeySecret !== '') {
+        const response = await api.credentials.set({ ref: draft.aliyunAccessKeySecretEnv.trim(), value: aliyunAccessKeySecret })
+        if (!response.result.ok) throw new Error(response.result.error.message)
+      }
+      if (aliyunAccessKeyId !== '' || aliyunAccessKeySecret !== '') setAliyunAccessKeyConfigured(true)
       const telegramKey = draft.telegramKey.trim()
       if (telegramKey !== '') {
         const response = await api.credentials.set({ ref: draft.telegramBotTokenEnv.trim(), value: telegramKey })
@@ -183,6 +217,10 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
         'minimaxVoice',
         'minimaxFormat',
         'aliyunNlsTokenEnv',
+        'aliyunAccessKeyIdEnv',
+        'aliyunAccessKeySecretEnv',
+        'aliyunTokenRegionId',
+        'aliyunTokenURL',
         'aliyunNlsAppKey',
         'aliyunAsrURL',
         'aliyunAsrFormat',
@@ -220,7 +258,7 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
       if (aliyunAsrSampleRate !== current.aliyunAsrSampleRate) {
         await scope.set('aliyunAsrSampleRate', aliyunAsrSampleRate)
       }
-      setDraft(previous => ({ ...previous, key: '', minimaxKey: '', aliyunToken: '', telegramKey: '' }))
+      setDraft(previous => ({ ...previous, key: '', minimaxKey: '', aliyunToken: '', aliyunAccessKeyId: '', aliyunAccessKeySecret: '', telegramKey: '' }))
       setDirty(false)
       setNotice({ kind: 'ok', text: t('settings.saved') })
     } catch (error) {
@@ -230,7 +268,7 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
     }
   }
 
-  const removeKey = async (ref: string, kind: 'openai' | 'minimax' | 'aliyun' | 'telegram'): Promise<void> => {
+  const removeKey = async (ref: string, kind: 'openai' | 'minimax' | 'aliyun' | 'aliyunAccessKey' | 'telegram'): Promise<void> => {
     setBusy(true)
     setNotice(undefined)
     try {
@@ -245,6 +283,9 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
       } else if (kind === 'aliyun') {
         setAliyunConfigured(false)
         setDraft(previous => ({ ...previous, aliyunToken: '' }))
+      } else if (kind === 'aliyunAccessKey') {
+        setAliyunAccessKeyConfigured(false)
+        setDraft(previous => ({ ...previous, aliyunAccessKeyId: '', aliyunAccessKeySecret: '' }))
       } else {
         setTelegramConfigured(false)
         setDraft(previous => ({ ...previous, telegramKey: '' }))
@@ -436,12 +477,58 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
             <p>{t('settings.aliyun.description')}</p>
           </div>
           <span className={css.status}>
-            <StateDot state={aliyunConfigured ? 'done' : 'warning'} />
-            {aliyunConfigured ? t('settings.key.configured') : t('settings.key.missing')}
+            <StateDot state={aliyunAccessKeyConfigured || aliyunConfigured ? 'done' : 'warning'} />
+            {aliyunAccessKeyConfigured || aliyunConfigured ? t('settings.key.configured') : t('settings.key.missing')}
           </span>
         </div>
 
         <div className={css.form}>
+          <div className={css.grid}>
+            <label className={css.field}>
+              <span>{t('settings.aliyunAccessKeyId.label')}</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={draft.aliyunAccessKeyId}
+                placeholder={aliyunAccessKeyConfigured ? t('settings.key.placeholderConfigured') : t('settings.key.placeholder')}
+                disabled={busy || !aliyunAccessKeyIdWritable}
+                onChange={event => { edit('aliyunAccessKeyId', event.target.value) }}
+              />
+            </label>
+            <label className={css.field}>
+              <span>{t('settings.aliyunAccessKeySecret.label')}</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={draft.aliyunAccessKeySecret}
+                placeholder={aliyunAccessKeyConfigured ? t('settings.key.placeholderConfigured') : t('settings.key.placeholder')}
+                disabled={busy || !aliyunAccessKeySecretWritable}
+                onChange={event => { edit('aliyunAccessKeySecret', event.target.value) }}
+              />
+            </label>
+          </div>
+
+          <div className={css.grid}>
+            <label className={css.field}>
+              <span>{t('settings.aliyunAccessKeyIdEnv.label')}</span>
+              <input
+                type="text"
+                value={draft.aliyunAccessKeyIdEnv}
+                disabled={disabled}
+                onChange={event => { edit('aliyunAccessKeyIdEnv', event.target.value) }}
+              />
+            </label>
+            <label className={css.field}>
+              <span>{t('settings.aliyunAccessKeySecretEnv.label')}</span>
+              <input
+                type="text"
+                value={draft.aliyunAccessKeySecretEnv}
+                disabled={disabled}
+                onChange={event => { edit('aliyunAccessKeySecretEnv', event.target.value) }}
+              />
+            </label>
+          </div>
+
           <label className={css.field}>
             <span>{t('settings.aliyunToken.label')}</span>
             <input
@@ -472,6 +559,27 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
                 value={draft.aliyunNlsAppKey}
                 disabled={disabled}
                 onChange={event => { edit('aliyunNlsAppKey', event.target.value) }}
+              />
+            </label>
+          </div>
+
+          <div className={css.grid}>
+            <label className={css.field}>
+              <span>{t('settings.aliyunTokenRegionId.label')}</span>
+              <input
+                type="text"
+                value={draft.aliyunTokenRegionId}
+                disabled={disabled}
+                onChange={event => { edit('aliyunTokenRegionId', event.target.value) }}
+              />
+            </label>
+            <label className={css.field}>
+              <span>{t('settings.aliyunTokenURL.label')}</span>
+              <input
+                type="url"
+                value={draft.aliyunTokenURL}
+                disabled={disabled}
+                onChange={event => { edit('aliyunTokenURL', event.target.value) }}
               />
             </label>
           </div>
@@ -623,6 +731,20 @@ export function AssistantSettingsSection(props: AssistantSettingsSectionProps): 
             {aliyunConfigured ? (
               <Button variant="ghost" disabled={busy || !aliyunCredentialWritable} onClick={() => { void removeKey(aliyunCredentialRef, 'aliyun') }}>
                 {t('settings.aliyunToken.remove')}
+              </Button>
+            ) : null}
+            {aliyunAccessKeyConfigured ? (
+              <Button
+                variant="ghost"
+                disabled={busy || !aliyunAccessKeyIdWritable || !aliyunAccessKeySecretWritable}
+                onClick={() => {
+                  void Promise.all([
+                    removeKey(aliyunAccessKeyIdRef, 'aliyunAccessKey'),
+                    removeKey(aliyunAccessKeySecretRef, 'aliyunAccessKey'),
+                  ])
+                }}
+              >
+                {t('settings.aliyunAccessKey.remove')}
               </Button>
             ) : null}
             {telegramConfigured ? (
