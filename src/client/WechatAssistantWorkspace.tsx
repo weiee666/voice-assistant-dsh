@@ -426,8 +426,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       setMessages(hostMessagesToConversations(hostMessages))
       if (sessionId === undefined || busy.current || snapshot?.running === true) return
       const pending = hostMessages.find(message => (
-        message.source === 'telegram'
-        && message.conversation === 'self'
+        message.conversation === 'self'
         && message.role === 'user'
         && message.status === 'pending'
         && !processingHostMessageIds.current.has(message.id)
@@ -445,7 +444,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
         pendingHostReplyId.current = null
         busy.current = false
         setSending(false)
-        setError(failure)
+        if (failure !== t('status.noSessionError')) setError(failure)
         processingHostMessageIds.current.delete(pending.id)
       }
     }
@@ -461,7 +460,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       disposed = true
       window.clearInterval(interval)
     }
-  }, [boundSessionId, open, send, sessionId, settingsSnapshot.value?.bridgePollIntervalMs, snapshot?.running])
+  }, [boundSessionId, open, send, sessionId, settingsSnapshot.value?.bridgePollIntervalMs, snapshot?.running, t])
 
   useEffect(() => () => {
     stopSecretaryCapture()
@@ -630,13 +629,20 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       setError(failure instanceof Error ? failure.message : String(failure))
       return
     }
+    if (sessionId === undefined) {
+      pendingConversation.current = null
+      pendingHostReplyId.current = null
+      busy.current = false
+      setSending(false)
+      return
+    }
     const failure = await send(sessionId, conversation, text)
     if (failure !== null) {
       pendingConversation.current = null
       pendingHostReplyId.current = null
       busy.current = false
       setSending(false)
-      setError(failure)
+      if (failure !== t('status.noSessionError')) setError(failure)
     }
   }
 
