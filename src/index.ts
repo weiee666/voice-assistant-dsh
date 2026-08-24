@@ -23,8 +23,10 @@ const SECRETARY_TTS_PATH = '/api/wechat-assistant/tts'
 const SECRETARY_ASR_PATH = '/api/wechat-assistant/asr'
 const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
 const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
+const ASSISTANT_STATE_PATH = '/api/wechat-assistant/state'
 const MAX_TTS_TEXT_LENGTH = 4_000
 const MAX_MESSAGE_TEXT_LENGTH = 8_000
+const MAX_SESSION_ID_LENGTH = 200
 const MAX_ASR_BYTES = 2 * 1024 * 1024
 const MAX_BRIDGE_MESSAGES = 500
 
@@ -417,6 +419,7 @@ function dashboardReply(settings: Config): string {
 
 function createBridgeStore() {
   let nextMessageId = 1
+  let secretarySessionId: string | undefined
   const messages: AssistantBridgeMessage[] = []
   const append = (message: Omit<AssistantBridgeMessage, 'id' | 'time'> & { readonly time?: number }): AssistantBridgeMessage => {
     const stored: AssistantBridgeMessage = {
@@ -433,7 +436,15 @@ function createBridgeStore() {
     append,
     list: () => messages,
     find: (id: string) => messages.find(message => message.id === id),
+    readState: () => ({ secretarySessionId }),
+    bindSecretarySession: (value: string) => { secretarySessionId = value },
   }
+}
+
+function readSessionId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const sessionId = value.trim()
+  return sessionId === '' || sessionId.length > MAX_SESSION_ID_LENGTH ? undefined : sessionId
 }
 
 async function resolveOptionalCredential(ctx: Context, ref: string): Promise<string | undefined> {
@@ -542,6 +553,28 @@ export function apply(ctx: Context, config: Config): void {
       answer(res, 200, 'application/json; charset=utf-8', JSON.stringify({ message }))
     },
   }), 'ui-a2a-assistant: bridge message route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: ASSISTANT_STATE_PATH,
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        answer(res, 200, 'application/json; charset=utf-8', JSON.stringify(bridge.readState()))
+        return
+      }
+      if (req.method !== 'POST') {
+        answer(res, 405, 'application/json; charset=utf-8', JSON.stringify({ error: 'Method not allowed' }))
+        return
+      }
+      const parsed = readJsonBody(await readBody(req)) as { readonly secretarySessionId?: unknown } | undefined
+      const secretarySessionId = readSessionId(parsed?.secretarySessionId)
+      if (secretarySessionId === undefined) {
+        answer(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'secretarySessionId is required' }))
+        return
+      }
+      bridge.bindSecretarySession(secretarySessionId)
+      answer(res, 200, 'application/json; charset=utf-8', JSON.stringify(bridge.readState()))
+    },
+  }), 'ui-a2a-assistant: bridge state route')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: ASSISTANT_REPLIES_PATH,

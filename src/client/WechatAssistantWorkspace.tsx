@@ -33,6 +33,10 @@ interface AssistantHostMessage {
   readonly status?: 'pending' | 'handled'
 }
 
+interface AssistantBridgeState {
+  readonly secretarySessionId?: string
+}
+
 type ConversationMessages = Record<ConversationId, readonly Message[]>
 
 interface ConversationDefinition {
@@ -74,30 +78,14 @@ const DEFINITIONS: readonly ConversationDefinition[] = [
 ]
 
 const EMPTY_MESSAGES: ConversationMessages = { self: [], teacher: [], claude: [], chatgpt: [] }
-const STORAGE_KEY = 'dsh.wechat-assistant.beta.minimax'
-const LEGACY_STORAGE_KEYS = ['dsh.wechat-assistant.beta'] as const
 const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
 const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
+const ASSISTANT_STATE_PATH = '/api/wechat-assistant/state'
 const SECRETARY_ASR_PATH = '/api/wechat-assistant/asr'
 const SECRETARY_ASR_SAMPLE_RATE = 16_000
 const SECRETARY_VOICE_THRESHOLD = 0.038
 const SECRETARY_PREFIX_MS = 450
 const SECRETARY_MAX_SEGMENT_MS = 8_000
-
-function loadMessages(): ConversationMessages {
-  for (const key of LEGACY_STORAGE_KEYS) localStorage.removeItem(key)
-  try {
-    const value = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '') as Partial<ConversationMessages>
-    return {
-      self: Array.isArray(value.self) ? value.self : [],
-      teacher: Array.isArray(value.teacher) ? value.teacher : [],
-      claude: Array.isArray(value.claude) ? value.claude : [],
-      chatgpt: Array.isArray(value.chatgpt) ? value.chatgpt : [],
-    }
-  } catch {
-    return EMPTY_MESSAGES
-  }
-}
 
 function assistantText(blocks: readonly { readonly kind: string; readonly text?: string }[]): string {
   return blocks.filter(block => block.kind === 'text').map(block => block.text ?? '').join('\n').trim()
@@ -203,6 +191,31 @@ async function fetchHostMessages(): Promise<readonly AssistantHostMessage[]> {
   return Array.isArray(body.messages) ? body.messages : []
 }
 
+function hostMessagesToConversations(hostMessages: readonly AssistantHostMessage[]): ConversationMessages {
+  const next: Record<ConversationId, Message[]> = { self: [], teacher: [], claude: [], chatgpt: [] }
+  for (const message of hostMessages) {
+    next[message.conversation].push({
+      id: `bridge-${message.id}`,
+      role: message.role,
+      text: message.text,
+      time: message.time,
+    })
+  }
+  return next
+}
+
+async function postHostMessage(conversation: ConversationId, role: Message['role'], text: string): Promise<AssistantHostMessage> {
+  const response = await fetch(ASSISTANT_MESSAGES_PATH, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conversation, role, text }),
+  })
+  if (!response.ok) throw new Error(`Assistant bridge returned ${response.status}`)
+  const body = await response.json() as { readonly message?: AssistantHostMessage }
+  if (body.message === undefined) throw new Error('Assistant bridge returned an invalid message')
+  return body.message
+}
+
 async function postHostReply(messageId: string, text: string): Promise<void> {
   const response = await fetch(ASSISTANT_REPLIES_PATH, {
     method: 'POST',
@@ -212,6 +225,22 @@ async function postHostReply(messageId: string, text: string): Promise<void> {
   if (!response.ok) throw new Error(`Assistant bridge returned ${response.status}`)
 }
 
+async function fetchAssistantState(): Promise<AssistantBridgeState> {
+  const response = await fetch(ASSISTANT_STATE_PATH, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`Assistant bridge state returned ${response.status}`)
+  return response.json() as Promise<AssistantBridgeState>
+}
+
+async function postAssistantState(secretarySessionId: SessionId): Promise<AssistantBridgeState> {
+  const response = await fetch(ASSISTANT_STATE_PATH, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ secretarySessionId }),
+  })
+  if (!response.ok) throw new Error(`Assistant bridge state returned ${response.status}`)
+  return response.json() as Promise<AssistantBridgeState>
+}
+
 /** Independent WeChat Assistant page, preserving the original dashboard layout. */
 export function WechatAssistantWorkspace({ useSessions, workspace, settings, resolveSession, send, t }: Props) {
   const open = useSyncExternalStore(workspace.subscribe, workspace.getSnapshot).open
@@ -219,14 +248,17 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     listener => settings.subscribe(listener),
     () => settings.getSnapshot(),
   )
-  const sessionId = useSessions(fallbackSessionId)
+  const fallbackId = useSessions(fallbackSessionId)
+  const [boundSessionId, setBoundSessionId] = useState<SessionId | undefined>(undefined)
+  const boundSession = resolveSession(boundSessionId)
+  const sessionId = boundSession === undefined ? fallbackId : boundSessionId
   const session = resolveSession(sessionId)
   const subscribeSession = useCallback((listener: () => void) => session?.subscribe(listener) ?? (() => {}), [session])
   const readSession = useCallback(() => session?.getSnapshot(), [session])
   const snapshot = useSyncExternalStore(subscribeSession, readSession, readSession)
   const [sidebarWidth, setSidebarWidth] = useState(0)
   const [conversation, setConversation] = useState<ConversationId>('self')
-  const [messages, setMessages] = useState<ConversationMessages>(loadMessages)
+  const [messages, setMessages] = useState<ConversationMessages>(EMPTY_MESSAGES)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -265,7 +297,6 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   const lastVoiceSubmission = useRef<{ readonly text: string; readonly time: number } | undefined>()
   const pendingConversation = useRef<ConversationId | null>(null)
   const pendingHostReplyId = useRef<string | null>(null)
-  const displayedHostMessageIds = useRef(new Set<string>())
   const processingHostMessageIds = useRef(new Set<string>())
   const seenAssistantSeq = useRef(0)
   const busy = useRef(false)
@@ -330,12 +361,17 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   }, [open, sidebarWidth, workspace])
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages))
-  }, [messages])
-
-  useEffect(() => {
     voiceSilenceMs.current = settingsSnapshot.value?.voiceSilenceMs ?? voiceSilenceMs.current
   }, [settingsSnapshot])
+
+  useEffect(() => {
+    if (!open || boundSessionId !== undefined || sessionId === undefined) return
+    void postAssistantState(sessionId)
+      .then(state => { setBoundSessionId(state.secretarySessionId as SessionId | undefined) })
+      .catch((failure) => {
+        setError(failure instanceof Error ? failure.message : String(failure))
+      })
+  }, [boundSessionId, open, sessionId])
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' })
@@ -353,19 +389,18 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     if (target === null) return
     const text = assistantText(latest.blocks)
     if (text === '') return
-    setMessages(current => ({
-      ...current,
-      [target]: [...current[target], { id: `assistant-${latest.seq}`, role: 'assistant', text, time: latest.time }],
-    }))
     pendingConversation.current = null
     const hostReplyId = pendingHostReplyId.current
     pendingHostReplyId.current = null
     busy.current = false
     setSending(false)
     if (hostReplyId !== null) {
-      void postHostReply(hostReplyId, text).catch((failure) => {
-        setError(failure instanceof Error ? failure.message : String(failure))
-      })
+      void postHostReply(hostReplyId, text)
+        .then(fetchHostMessages)
+        .then(hostMessages => { setMessages(hostMessagesToConversations(hostMessages)) })
+        .catch((failure) => {
+          setError(failure instanceof Error ? failure.message : String(failure))
+        })
     }
     if (calling && target === 'self') {
       const player = speechPlayer.current ?? new SpeechPlayer()
@@ -383,22 +418,12 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     if (!open) return
     let disposed = false
     const sync = async (): Promise<void> => {
-      const hostMessages = await fetchHostMessages()
+      const [hostMessages, state] = await Promise.all([fetchHostMessages(), fetchAssistantState()])
       if (disposed) return
-      const freshMessages = hostMessages.filter(message => message.source === 'telegram' && !displayedHostMessageIds.current.has(message.id))
-      if (freshMessages.length > 0) {
-        for (const message of freshMessages) displayedHostMessageIds.current.add(message.id)
-        setMessages(current => {
-          const next: ConversationMessages = { ...current }
-          for (const message of freshMessages) {
-            next[message.conversation] = [
-              ...next[message.conversation],
-              { id: `bridge-${message.id}`, role: message.role, text: message.text, time: message.time },
-            ]
-          }
-          return next
-        })
+      if (state.secretarySessionId !== undefined && state.secretarySessionId !== boundSessionId) {
+        setBoundSessionId(state.secretarySessionId as SessionId)
       }
+      setMessages(hostMessagesToConversations(hostMessages))
       if (sessionId === undefined || busy.current || snapshot?.running === true) return
       const pending = hostMessages.find(message => (
         message.source === 'telegram'
@@ -436,7 +461,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       disposed = true
       window.clearInterval(interval)
     }
-  }, [open, send, sessionId, settingsSnapshot.value?.bridgePollIntervalMs, snapshot?.running])
+  }, [boundSessionId, open, send, sessionId, settingsSnapshot.value?.bridgePollIntervalMs, snapshot?.running])
 
   useEffect(() => () => {
     stopSecretaryCapture()
@@ -574,6 +599,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
         ...current,
         chatgpt: [...current.chatgpt, { id: `user-${Date.now()}`, role: 'user', text, time: Date.now() }],
       }))
+      void postHostMessage('chatgpt', 'user', text).catch(() => {})
       try { call.sendText(text) } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) }
       return
     }
@@ -583,13 +609,31 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     setSending(true)
     busy.current = true
     pendingConversation.current = conversation
-    setMessages(current => ({
-      ...current,
-      [conversation]: [...current[conversation], { id: `user-${Date.now()}`, role: 'user', text, time: Date.now() }],
-    }))
+    let hostMessage: AssistantHostMessage
+    try {
+      hostMessage = await postHostMessage(conversation, 'user', text)
+      pendingHostReplyId.current = hostMessage.id
+      setMessages(current => ({
+        ...current,
+        [conversation]: [...current[conversation], {
+          id: `bridge-${hostMessage.id}`,
+          role: hostMessage.role,
+          text: hostMessage.text,
+          time: hostMessage.time,
+        }],
+      }))
+    } catch (failure) {
+      pendingConversation.current = null
+      pendingHostReplyId.current = null
+      busy.current = false
+      setSending(false)
+      setError(failure instanceof Error ? failure.message : String(failure))
+      return
+    }
     const failure = await send(sessionId, conversation, text)
     if (failure !== null) {
       pendingConversation.current = null
+      pendingHostReplyId.current = null
       busy.current = false
       setSending(false)
       setError(failure)
@@ -721,6 +765,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
           ...current,
           chatgpt: [...current.chatgpt, { id: `user-voice-${Date.now()}`, role: 'user', text: transcript, time: Date.now() }],
         }))
+        void postHostMessage('chatgpt', 'user', transcript).catch(() => {})
       },
       onAssistantTranscriptDelta: (text) => {
         const audio = remoteAudioRef.current
@@ -737,6 +782,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
           ...current,
           chatgpt: [...current.chatgpt, { id: `assistant-live-${Date.now()}`, role: 'assistant', text: transcript, time: Date.now() }],
         }))
+        void postHostMessage('chatgpt', 'assistant', transcript).catch(() => {})
       },
       onUserSpeechState: (active) => { setLiveUserActive(active) },
       onError: (message) => { setVoiceError(message) },
