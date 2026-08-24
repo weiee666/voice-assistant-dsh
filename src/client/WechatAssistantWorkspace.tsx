@@ -64,12 +64,16 @@ interface SpeechRecognitionEventLike {
   readonly results: ArrayLike<SpeechRecognitionResultLike>
 }
 
+interface SpeechRecognitionErrorEventLike {
+  readonly error?: string
+}
+
 interface SpeechRecognitionLike {
   continuous: boolean
   interimResults: boolean
   lang: string
   onresult: ((event: SpeechRecognitionEventLike) => void) | null
-  onerror: (() => void) | null
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null
   onend: (() => void) | null
   start(): void
   stop(): void
@@ -170,6 +174,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   const endRef = useRef<HTMLDivElement>(null)
   const remoteAudioRef = useRef<HTMLAudioElement>(null)
   const recognition = useRef<SpeechRecognitionLike | null>(null)
+  const microphoneStream = useRef<MediaStream | null>(null)
   const recognitionPaused = useRef(false)
   const realtimeCall = useRef<OpenAIRealtimeCall | null>(null)
   const speechPlayer = useRef<SpeechPlayer | null>(null)
@@ -452,6 +457,8 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     clearPendingVoiceSubmit()
     recognition.current?.stop()
     recognition.current = null
+    microphoneStream.current?.getTracks().forEach(track => { track.stop() })
+    microphoneStream.current = null
     speechSeq.current += 1
     speechPlayer.current?.stop()
     realtimeCall.current?.stop()
@@ -468,12 +475,23 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     setCalling(false)
   }
 
-  const startBrowserCall = (): void => {
+  const startBrowserCall = async (): Promise<void> => {
     const voiceWindow = window as VoiceWindow
     const Constructor = voiceWindow.SpeechRecognition ?? voiceWindow.webkitSpeechRecognition
     if (Constructor === undefined) { setVoiceError(t('call.unsupported')); return }
     setVoiceError(null)
     bindRemoteAudio(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      })
+      microphoneStream.current?.getTracks().forEach(track => { track.stop() })
+      microphoneStream.current = stream
+    } catch (failure) {
+      setVoiceError(failure instanceof Error ? `${t('call.permission')}: ${failure.message}` : t('call.permission'))
+      stopCall()
+      return
+    }
     const engine = new Constructor()
     clearPendingVoiceSubmit()
     lastVoiceSubmission.current = undefined
@@ -502,7 +520,11 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
         scheduleVoiceSubmit(interim)
       }
     }
-    engine.onerror = () => { setVoiceError(t('call.permission')); stopCall() }
+    engine.onerror = (event) => {
+      const detail = event.error === undefined ? '' : `: ${event.error}`
+      setVoiceError(`${t('call.permission')}${detail}`)
+      stopCall()
+    }
     engine.onend = () => {
       if (recognition.current === engine && !recognitionPaused.current) {
         try { engine.start() } catch { stopCall() }
@@ -513,7 +535,10 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     setCallPaused(false)
     setCallState('connected')
     setCalling(true)
-    try { engine.start() } catch { setVoiceError(t('call.permission')); stopCall() }
+    try { engine.start() } catch (failure) {
+      setVoiceError(failure instanceof Error ? `${t('call.permission')}: ${failure.message}` : t('call.permission'))
+      stopCall()
+    }
   }
 
   const startRealtimeCall = async (): Promise<void> => {
@@ -575,7 +600,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
 
   const startCall = (): void => {
     if (conversation === 'chatgpt') void startRealtimeCall()
-    else startBrowserCall()
+    else void startBrowserCall()
   }
 
   const togglePause = (): void => {
