@@ -7,11 +7,11 @@ export declare const zh: {
     readonly 'group.system': "系统 Agent";
     readonly 'group.pairs': "Agent 对话";
     readonly 'group.pairs.empty': "有跨 Agent 对话时会显示在这里";
-    readonly 'conversation.self': "我和秘书";
+    readonly 'conversation.self': "秘书";
     readonly 'conversation.teacher': "老师 Agent";
     readonly 'conversation.claude': "Claude";
     readonly 'conversation.chatgpt': "ChatGPT";
-    readonly 'conversation.self.subtitle': "直接会话";
+    readonly 'conversation.self.subtitle': "专属助手";
     readonly 'conversation.teacher.subtitle': "苏格拉底 + 费曼";
     readonly 'conversation.claude.subtitle': "本地 Claude Code CLI";
     readonly 'conversation.chatgpt.subtitle': "OpenAI Realtime Live";

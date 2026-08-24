@@ -23,6 +23,16 @@ interface Message {
   readonly time: number
 }
 
+interface AssistantHostMessage {
+  readonly id: string
+  readonly conversation: ConversationId
+  readonly role: 'user' | 'assistant' | 'system'
+  readonly text: string
+  readonly time: number
+  readonly source: 'web' | 'telegram'
+  readonly status?: 'pending' | 'handled'
+}
+
 type ConversationMessages = Record<ConversationId, readonly Message[]>
 
 interface ConversationDefinition {
@@ -80,6 +90,8 @@ const DEFINITIONS: readonly ConversationDefinition[] = [
 const EMPTY_MESSAGES: ConversationMessages = { self: [], teacher: [], claude: [], chatgpt: [] }
 const STORAGE_KEY = 'dsh.wechat-assistant.beta.minimax'
 const LEGACY_STORAGE_KEYS = ['dsh.wechat-assistant.beta'] as const
+const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
+const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
 
 function loadMessages(): ConversationMessages {
   for (const key of LEGACY_STORAGE_KEYS) localStorage.removeItem(key)
@@ -108,6 +120,22 @@ function definitionOf<T extends ConversationDefinition>(definitions: readonly T[
   const definition = definitions.find(candidate => candidate.id === id)
   if (definition === undefined) throw new Error(`ui-a2a-assistant: missing conversation definition for ${id}`)
   return definition
+}
+
+async function fetchHostMessages(): Promise<readonly AssistantHostMessage[]> {
+  const response = await fetch(ASSISTANT_MESSAGES_PATH, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`Assistant bridge returned ${response.status}`)
+  const body = await response.json() as { readonly messages?: readonly AssistantHostMessage[] }
+  return Array.isArray(body.messages) ? body.messages : []
+}
+
+async function postHostReply(messageId: string, text: string): Promise<void> {
+  const response = await fetch(ASSISTANT_REPLIES_PATH, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messageId, text }),
+  })
+  if (!response.ok) throw new Error(`Assistant bridge returned ${response.status}`)
 }
 
 /** Independent WeChat Assistant page, preserving the original dashboard layout. */
@@ -151,6 +179,9 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   const voiceSilenceMs = useRef(settingsSnapshot.value?.voiceSilenceMs ?? 2800)
   const lastVoiceSubmission = useRef<{ readonly text: string; readonly time: number } | undefined>()
   const pendingConversation = useRef<ConversationId | null>(null)
+  const pendingHostReplyId = useRef<string | null>(null)
+  const displayedHostMessageIds = useRef(new Set<string>())
+  const processingHostMessageIds = useRef(new Set<string>())
   const seenAssistantSeq = useRef(0)
   const busy = useRef(false)
 
@@ -242,8 +273,15 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       [target]: [...current[target], { id: `assistant-${latest.seq}`, role: 'assistant', text, time: latest.time }],
     }))
     pendingConversation.current = null
+    const hostReplyId = pendingHostReplyId.current
+    pendingHostReplyId.current = null
     busy.current = false
     setSending(false)
+    if (hostReplyId !== null) {
+      void postHostReply(hostReplyId, text).catch((failure) => {
+        setError(failure instanceof Error ? failure.message : String(failure))
+      })
+    }
     if (calling && target === 'self') {
       const player = speechPlayer.current ?? new SpeechPlayer()
       speechPlayer.current = player
@@ -255,6 +293,65 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
         .finally(() => { if (speechSeq.current === seq) setVoiceSpeaker('user') })
     }
   }, [calling, snapshot])
+
+  useEffect(() => {
+    if (!open) return
+    let disposed = false
+    const sync = async (): Promise<void> => {
+      const hostMessages = await fetchHostMessages()
+      if (disposed) return
+      const freshMessages = hostMessages.filter(message => message.source === 'telegram' && !displayedHostMessageIds.current.has(message.id))
+      if (freshMessages.length > 0) {
+        for (const message of freshMessages) displayedHostMessageIds.current.add(message.id)
+        setMessages(current => {
+          const next: ConversationMessages = { ...current }
+          for (const message of freshMessages) {
+            next[message.conversation] = [
+              ...next[message.conversation],
+              { id: `bridge-${message.id}`, role: message.role, text: message.text, time: message.time },
+            ]
+          }
+          return next
+        })
+      }
+      if (sessionId === undefined || busy.current || snapshot?.running === true) return
+      const pending = hostMessages.find(message => (
+        message.source === 'telegram'
+        && message.conversation === 'self'
+        && message.role === 'user'
+        && message.status === 'pending'
+        && !processingHostMessageIds.current.has(message.id)
+      ))
+      if (pending === undefined) return
+      processingHostMessageIds.current.add(pending.id)
+      setError(null)
+      setSending(true)
+      busy.current = true
+      pendingConversation.current = 'self'
+      pendingHostReplyId.current = pending.id
+      const failure = await send(sessionId, 'self', pending.text)
+      if (failure !== null) {
+        pendingConversation.current = null
+        pendingHostReplyId.current = null
+        busy.current = false
+        setSending(false)
+        setError(failure)
+        processingHostMessageIds.current.delete(pending.id)
+      }
+    }
+    const interval = window.setInterval(() => {
+      void sync().catch((failure) => {
+        if (!disposed) setError(failure instanceof Error ? failure.message : String(failure))
+      })
+    }, settingsSnapshot.value?.bridgePollIntervalMs ?? 1500)
+    void sync().catch((failure) => {
+      if (!disposed) setError(failure instanceof Error ? failure.message : String(failure))
+    })
+    return () => {
+      disposed = true
+      window.clearInterval(interval)
+    }
+  }, [open, send, sessionId, settingsSnapshot.value?.bridgePollIntervalMs, snapshot?.running])
 
   useEffect(() => () => {
     recognition.current?.stop()

@@ -19,7 +19,38 @@ export const inject = ['credentials', 'webServer']
 
 const REALTIME_PATH = '/api/wechat-assistant/openai/realtime'
 const SECRETARY_TTS_PATH = '/api/wechat-assistant/tts'
+const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
+const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
 const MAX_TTS_TEXT_LENGTH = 4_000
+const MAX_MESSAGE_TEXT_LENGTH = 8_000
+const MAX_BRIDGE_MESSAGES = 500
+
+type ConversationId = 'self' | 'teacher' | 'claude' | 'chatgpt'
+type AssistantMessageRole = 'user' | 'assistant' | 'system'
+type AssistantMessageSource = 'web' | 'telegram'
+type AssistantMessageStatus = 'pending' | 'handled'
+
+interface AssistantBridgeMessage {
+  readonly id: string
+  readonly conversation: ConversationId
+  readonly role: AssistantMessageRole
+  readonly text: string
+  readonly time: number
+  readonly source: AssistantMessageSource
+  readonly telegramChatId?: number
+  readonly telegramMessageId?: number
+  status?: AssistantMessageStatus
+}
+
+interface TelegramUpdate {
+  readonly update_id?: unknown
+  readonly message?: {
+    readonly message_id?: unknown
+    readonly from?: { readonly id?: unknown }
+    readonly chat?: { readonly id?: unknown }
+    readonly text?: unknown
+  }
+}
 
 /** Voice service settings owned by the assistant deployment. */
 export interface Config extends AssistantSettings {}
@@ -215,6 +246,91 @@ function readTtsText(body: string): string | undefined {
   }
 }
 
+function readJsonBody(body: string): unknown {
+  try {
+    return JSON.parse(body) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+function readConversation(value: unknown): ConversationId | undefined {
+  return value === 'self' || value === 'teacher' || value === 'claude' || value === 'chatgpt' ? value : undefined
+}
+
+function readMessageRole(value: unknown): AssistantMessageRole | undefined {
+  return value === 'user' || value === 'assistant' || value === 'system' ? value : undefined
+}
+
+function readMessageText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  return text === '' || text.length > MAX_MESSAGE_TEXT_LENGTH ? undefined : text
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function parseAllowedTelegramUsers(raw: string): ReadonlySet<number> {
+  const ids = raw
+    .split(',')
+    .map(part => Number.parseInt(part.trim(), 10))
+    .filter(Number.isFinite)
+  return new Set(ids)
+}
+
+function isDashboardCommand(text: string): boolean {
+  const normalized = text.trim().toLowerCase()
+  return normalized === '看板' || normalized === '/dashboard' || normalized === 'dashboard'
+}
+
+function dashboardReply(settings: Config): string {
+  const url = settings.publicDashboardUrl.trim()
+  return url === ''
+    ? '公网看板地址还没有配置。请先在微信助手设置里填写 Vercel 生产地址。'
+    : `看板地址：${url}`
+}
+
+function createBridgeStore() {
+  let nextMessageId = 1
+  const messages: AssistantBridgeMessage[] = []
+  const append = (message: Omit<AssistantBridgeMessage, 'id' | 'time'> & { readonly time?: number }): AssistantBridgeMessage => {
+    const stored: AssistantBridgeMessage = {
+      ...message,
+      id: String(nextMessageId),
+      time: message.time ?? Date.now(),
+    }
+    messages.push(stored)
+    if (messages.length > MAX_BRIDGE_MESSAGES) messages.splice(0, messages.length - MAX_BRIDGE_MESSAGES)
+    nextMessageId += 1
+    return stored
+  }
+  return {
+    append,
+    list: () => messages,
+    find: (id: string) => messages.find(message => message.id === id),
+  }
+}
+
+async function resolveOptionalCredential(ctx: Context, ref: string): Promise<string | undefined> {
+  const credential = await ctx.credentials.resolve(credentialRef(ref))
+  return credential?.value
+}
+
+async function telegramRequest(token: string, method: string, body?: object): Promise<unknown> {
+  const init: RequestInit = body === undefined
+    ? { method: 'GET' }
+    : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, init)
+  if (!response.ok) throw new Error(`Telegram ${method} failed with ${response.status}`)
+  return response.json() as Promise<unknown>
+}
+
+async function sendTelegramMessage(token: string, chatId: number, text: string): Promise<void> {
+  await telegramRequest(token, 'sendMessage', { chat_id: chatId, text })
+}
+
 async function createSecretarySpeech(ctx: Context, text: string, config: Config): Promise<Response> {
   const credential = await ctx.credentials.resolve(credentialRef(config.minimaxApiKeyEnv))
   if (credential === undefined) {
@@ -232,6 +348,9 @@ async function createSecretarySpeech(ctx: Context, text: string, config: Config)
  */
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
+  const bridge = createBridgeStore()
+  let telegramOffset = 0
+  let telegramPolling = false
   installSettingsSection(
     ctx,
     settingsNamespace(A2A_ASSISTANT_SETTINGS_NAMESPACE),
@@ -239,6 +358,108 @@ export function apply(ctx: Context, config: Config): void {
     config,
     { setSource: source => { current = source }, onChange: () => {} },
   )
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: ASSISTANT_MESSAGES_PATH,
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        answer(res, 200, 'application/json; charset=utf-8', JSON.stringify({ messages: bridge.list() }))
+        return
+      }
+      if (req.method !== 'POST') {
+        answer(res, 405, 'application/json; charset=utf-8', JSON.stringify({ error: 'Method not allowed' }))
+        return
+      }
+      const parsed = readJsonBody(await readBody(req)) as {
+        readonly conversation?: unknown
+        readonly role?: unknown
+        readonly text?: unknown
+      } | undefined
+      const conversation = readConversation(parsed?.conversation)
+      const role = readMessageRole(parsed?.role)
+      const text = readMessageText(parsed?.text)
+      if (conversation === undefined || role === undefined || text === undefined) {
+        answer(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'conversation, role and text are required' }))
+        return
+      }
+      const message = bridge.append({ conversation, role, text, source: 'web', status: 'handled' })
+      answer(res, 200, 'application/json; charset=utf-8', JSON.stringify({ message }))
+    },
+  }), 'ui-a2a-assistant: bridge message route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: ASSISTANT_REPLIES_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        answer(res, 405, 'application/json; charset=utf-8', JSON.stringify({ error: 'Method not allowed' }))
+        return
+      }
+      const parsed = readJsonBody(await readBody(req)) as { readonly messageId?: unknown; readonly text?: unknown } | undefined
+      const messageId = typeof parsed?.messageId === 'string' ? parsed.messageId : undefined
+      const text = readMessageText(parsed?.text)
+      const source = messageId === undefined ? undefined : bridge.find(messageId)
+      if (messageId === undefined || text === undefined || source === undefined) {
+        answer(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'messageId and text are required' }))
+        return
+      }
+      source.status = 'handled'
+      bridge.append({ conversation: source.conversation, role: 'assistant', text, source: 'web', status: 'handled' })
+      if (source.telegramChatId !== undefined) {
+        const token = await resolveOptionalCredential(ctx, current().telegramBotTokenEnv)
+        if (token !== undefined) await sendTelegramMessage(token, source.telegramChatId, text)
+      }
+      answer(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true }))
+    },
+  }), 'ui-a2a-assistant: bridge reply route')
+  ctx.effect(() => {
+    const poll = async (): Promise<void> => {
+      if (telegramPolling) return
+      telegramPolling = true
+      try {
+        const settings = current()
+        const token = await resolveOptionalCredential(ctx, settings.telegramBotTokenEnv)
+        if (token === undefined) return
+        const result = await telegramRequest(token, `getUpdates?timeout=0&offset=${telegramOffset}`) as {
+          readonly ok?: unknown
+          readonly result?: readonly TelegramUpdate[]
+        }
+        const allowed = parseAllowedTelegramUsers(settings.telegramAllowedUserIds)
+        for (const update of result.result ?? []) {
+          const updateId = readNumber(update.update_id)
+          if (updateId !== undefined) telegramOffset = Math.max(telegramOffset, updateId + 1)
+          const message = update.message
+          const chatId = readNumber(message?.chat?.id)
+          const userId = readNumber(message?.from?.id)
+          const messageId = readNumber(message?.message_id)
+          const text = readMessageText(message?.text)
+          if (chatId === undefined || text === undefined) continue
+          if (allowed.size > 0 && (userId === undefined || !allowed.has(userId))) continue
+          if (isDashboardCommand(text)) {
+            await sendTelegramMessage(token, chatId, dashboardReply(settings))
+            continue
+          }
+          const bridgeMessage: Omit<AssistantBridgeMessage, 'id' | 'time'> = {
+            conversation: 'self',
+            role: 'user',
+            text,
+            source: 'telegram',
+            telegramChatId: chatId,
+            status: 'pending',
+          }
+          if (messageId !== undefined) {
+            bridge.append({ ...bridgeMessage, telegramMessageId: messageId })
+          } else {
+            bridge.append(bridgeMessage)
+          }
+        }
+      } finally {
+        telegramPolling = false
+      }
+    }
+    const timer = setInterval(() => { void poll().catch(() => {}) }, Math.max(500, current().bridgePollIntervalMs))
+    void poll().catch(() => {})
+    return () => { clearInterval(timer) }
+  }, 'ui-a2a-assistant: Telegram polling bridge')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: REALTIME_PATH,
