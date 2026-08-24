@@ -617,7 +617,6 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       <aside className={`${css.conversationSidebar}${mobileChat ? ` ${css.mobileHidden}` : ''}`}>
         <header className={css.sidebarHeader}>
           <strong>{t('workspace.title')}</strong>
-          <span><i className={session === undefined ? css.offlineDot : css.onlineDot} />{session === undefined ? t('status.offline') : t('status.connected')}</span>
         </header>
         <div className={css.groupLabel}>{t('group.mine')}</div>
         <ConversationButton
@@ -638,7 +637,6 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
         ))}
         <div className={css.groupLabel}>{t('group.pairs')}</div>
         <div className={css.pairEmpty}>{t('group.pairs.empty')}</div>
-        <footer className={css.connection}><i className={session === undefined ? css.offlineDot : css.onlineDot} />{session === undefined ? t('status.noSession') : t('status.currentSession')}</footer>
       </aside>
       <section className={`${css.chat}${mobileChat ? ` ${css.mobileChat}` : ''}`}>
         <header className={css.chatHeader}>

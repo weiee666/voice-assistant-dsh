@@ -17,9 +17,8 @@
   color: var(--dsw-alias-label-primary); background: #f4f5f7; pointer-events: auto;
 }
 .conversationSidebar { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--dsw-alias-border-l2); background: #fff; }
-.sidebarHeader { flex: none; padding: 14px 16px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.sidebarHeader { flex: none; padding: 14px 16px 10px; }
 .sidebarHeader strong { display: block; font-size: 16px; }
-.sidebarHeader span { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: #858b95; font-size: 12px; }
 .onlineDot, .offlineDot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: #00b42a; }
 .offlineDot { background: #f53f3f; }
 .connectingDot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: #ff9a2e; }
@@ -36,7 +35,6 @@
 .conversationCopy small { margin-top: 3px; color: #8a9099; font-size: 12px; }
 .conversationRow time, .conversationActive time { align-self: start; padding-top: 2px; color: #a0a5ad; font-size: 10px; }
 .pairEmpty { padding: 9px 16px; color: #a0a5ad; font-size: 12px; }
-.connection { display: flex; align-items: center; gap: 6px; margin-top: auto; padding: 10px 16px; border-top: 1px solid var(--dsw-alias-border-l2); color: #858b95; font-size: 12px; }
 
 .chat { display: flex; min-width: 0; min-height: 0; flex-direction: column; background: #f4f5f7; }
 .chatHeader { display: flex; flex: none; min-height: 58px; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--dsw-alias-border-l2); background: #fff; }
@@ -95,7 +93,7 @@
 :global(body[data-ds-dark-theme]) .workspace, :global(body[data-ds-dark-theme]) .chat { background: #1b1d20; }
 :global(body[data-ds-dark-theme]) .conversationSidebar, :global(body[data-ds-dark-theme]) .sidebarHeader, :global(body[data-ds-dark-theme]) .chatHeader, :global(body[data-ds-dark-theme]) .composer { background: #222428; }
 :global(body[data-ds-dark-theme]) .conversationRow:hover, :global(body[data-ds-dark-theme]) .conversationActive { background: #303338; }
-:global(body[data-ds-dark-theme]) .sidebarHeader span, :global(body[data-ds-dark-theme]) .groupLabel, :global(body[data-ds-dark-theme]) .conversationCopy small, :global(body[data-ds-dark-theme]) .connection, :global(body[data-ds-dark-theme]) .chatIdentity span { color: #a6acb5; }
+:global(body[data-ds-dark-theme]) .groupLabel, :global(body[data-ds-dark-theme]) .conversationCopy small, :global(body[data-ds-dark-theme]) .chatIdentity span { color: #a6acb5; }
 :global(body[data-ds-dark-theme]) .participants span { border-color: #222428; }
 :global(body[data-ds-dark-theme]) .call, :global(body[data-ds-dark-theme]) .more, :global(body[data-ds-dark-theme]) .bubbleWrap p, :global(body[data-ds-dark-theme]) .inputRow textarea { color: #eef0f3; background: #292c31; }
 :global(body[data-ds-dark-theme]) .messageMine .bubbleWrap p { color: #fff; background: #3370ff; }
