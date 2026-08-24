@@ -25,6 +25,14 @@ export declare function createRealtimeClientSecret(apiKey: string, config: Confi
  * @returns an audio response decoded from the upstream hex payload.
  */
 export declare function createMiniMaxSpeech(apiKey: string, text: string, config: Config, fetcher?: typeof fetch): Promise<Response>;
+/** Request a short-sentence transcript from Aliyun Intelligent Speech Interaction.
+ * @param token - server-resolved Aliyun NLS token.
+ * @param audio - PCM audio bytes captured by the browser.
+ * @param config - validated Aliyun ASR settings.
+ * @param fetcher - HTTP implementation, replaceable by focused tests.
+ * @returns the Aliyun ASR response.
+ */
+export declare function createAliyunAsrTranscript(token: string, audio: Uint8Array, config: Config, fetcher?: typeof fetch): Promise<Response>;
 /** Register the voice service routes.
  * @param ctx - host context carrying credentials and the Web route registry.
  * @param config - validated voice settings.

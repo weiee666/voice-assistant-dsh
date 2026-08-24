@@ -19,10 +19,12 @@ export const inject = ['credentials', 'webServer']
 
 const REALTIME_PATH = '/api/wechat-assistant/openai/realtime'
 const SECRETARY_TTS_PATH = '/api/wechat-assistant/tts'
+const SECRETARY_ASR_PATH = '/api/wechat-assistant/asr'
 const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
 const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
 const MAX_TTS_TEXT_LENGTH = 4_000
 const MAX_MESSAGE_TEXT_LENGTH = 8_000
+const MAX_ASR_BYTES = 2 * 1024 * 1024
 const MAX_BRIDGE_MESSAGES = 500
 
 type ConversationId = 'self' | 'teacher' | 'claude' | 'chatgpt'
@@ -68,6 +70,11 @@ export const Config: z<Config> = z.object({
   minimaxModel: z.string().default('speech-2.8-turbo'),
   minimaxVoice: z.string().default('male-qn-qingse'),
   minimaxFormat: z.string().default('mp3'),
+  aliyunNlsTokenEnv: z.string().role('credential-ref').default('ALIYUN_NLS_TOKEN'),
+  aliyunNlsAppKey: z.string().default(''),
+  aliyunAsrURL: z.string().default('https://nls-gateway-ap-southeast-1.aliyuncs.com/stream/v1/asr'),
+  aliyunAsrFormat: z.string().default('pcm'),
+  aliyunAsrSampleRate: z.natural().min(8000).default(16000),
   publicDashboardUrl: z.string().default(''),
   bridgeDeviceName: z.string().default('local-harness'),
   bridgePollIntervalMs: z.natural().min(500).default(1500),
@@ -177,6 +184,36 @@ export async function createMiniMaxSpeech(
   return new Response(audioBody, { status: 200, headers: { 'content-type': contentTypeForAudioFormat(config.minimaxFormat) } })
 }
 
+/** Request a short-sentence transcript from Aliyun Intelligent Speech Interaction.
+ * @param token - server-resolved Aliyun NLS token.
+ * @param audio - PCM audio bytes captured by the browser.
+ * @param config - validated Aliyun ASR settings.
+ * @param fetcher - HTTP implementation, replaceable by focused tests.
+ * @returns the Aliyun ASR response.
+ */
+export async function createAliyunAsrTranscript(
+  token: string,
+  audio: Uint8Array,
+  config: Config,
+  fetcher: typeof fetch = fetch,
+): Promise<Response> {
+  const url = new URL(config.aliyunAsrURL)
+  url.searchParams.set('appkey', config.aliyunNlsAppKey)
+  url.searchParams.set('format', config.aliyunAsrFormat)
+  url.searchParams.set('sample_rate', String(config.aliyunAsrSampleRate))
+  url.searchParams.set('enable_punctuation_prediction', 'true')
+  url.searchParams.set('enable_inverse_text_normalization', 'true')
+  url.searchParams.set('enable_voice_detection', 'true')
+  return fetcher(url, {
+    method: 'POST',
+    headers: {
+      'X-NLS-Token': token,
+      'content-type': 'application/octet-stream',
+    },
+    body: bodyBuffer(audio),
+  })
+}
+
 function readClientSecret(body: string): string | undefined {
   try {
     const parsed = JSON.parse(body) as { readonly value?: unknown }
@@ -219,6 +256,12 @@ function contentTypeForAudioFormat(format: string): string {
   }
 }
 
+function bodyBuffer(bytes: Uint8Array): ArrayBuffer {
+  const body = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(body).set(bytes)
+  return body
+}
+
 function answer(res: ServerResponse, status: number, contentType: string, body: string): void {
   res.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store' })
   res.end(body)
@@ -233,6 +276,17 @@ async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
   return Buffer.concat(chunks).toString('utf8')
+}
+
+function readAsrAudio(body: string): Uint8Array | undefined {
+  try {
+    const parsed = JSON.parse(body) as { readonly audio?: unknown }
+    if (typeof parsed.audio !== 'string' || parsed.audio === '') return undefined
+    const bytes = Buffer.from(parsed.audio, 'base64')
+    return bytes.byteLength > MAX_ASR_BYTES ? undefined : new Uint8Array(bytes)
+  } catch {
+    return undefined
+  }
 }
 
 function readTtsText(body: string): string | undefined {
@@ -340,6 +394,23 @@ async function createSecretarySpeech(ctx: Context, text: string, config: Config)
     })
   }
   return createMiniMaxSpeech(credential.value, text, config)
+}
+
+async function createSecretaryAsr(ctx: Context, audio: Uint8Array, config: Config): Promise<Response> {
+  if (config.aliyunNlsAppKey.trim() === '') {
+    return new Response(JSON.stringify({ error: 'Aliyun NLS AppKey is not configured' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  }
+  const credential = await ctx.credentials.resolve(credentialRef(config.aliyunNlsTokenEnv))
+  if (credential === undefined) {
+    return new Response(JSON.stringify({ error: `${config.aliyunNlsTokenEnv} is not configured` }), {
+      status: 503,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  }
+  return createAliyunAsrTranscript(credential.value, audio, config)
 }
 
 /** Register the voice service routes.
@@ -520,4 +591,22 @@ export function apply(ctx: Context, config: Config): void {
       answerBytes(res, speechResponse.status, contentType, speechBody)
     },
   }), 'ui-a2a-assistant: Secretary TTS route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: SECRETARY_ASR_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        answer(res, 405, 'application/json; charset=utf-8', JSON.stringify({ error: 'Method not allowed' }))
+        return
+      }
+      const audio = readAsrAudio(await readBody(req))
+      if (audio === undefined || audio.byteLength === 0) {
+        answer(res, 400, 'application/json; charset=utf-8', JSON.stringify({ error: 'Audio is required and must be at most 2MB' }))
+        return
+      }
+      const asrResponse = await createSecretaryAsr(ctx, audio, current())
+      const body = await asrResponse.text()
+      answer(res, asrResponse.status, asrResponse.headers.get('content-type') ?? 'application/json; charset=utf-8', body)
+    },
+  }), 'ui-a2a-assistant: Secretary Aliyun ASR route')
 }

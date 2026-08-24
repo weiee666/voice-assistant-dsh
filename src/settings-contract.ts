@@ -29,6 +29,16 @@ export interface AssistantSettings {
   minimaxVoice: string
   /** MiniMax audio response format. */
   minimaxFormat: string
+  /** Credential reference resolved for Aliyun short-sentence ASR requests. */
+  aliyunNlsTokenEnv: string
+  /** Aliyun Intelligent Speech Interaction project AppKey. */
+  aliyunNlsAppKey: string
+  /** Aliyun short-sentence ASR endpoint. */
+  aliyunAsrURL: string
+  /** Audio format sent to Aliyun ASR. */
+  aliyunAsrFormat: string
+  /** Audio sample rate sent to Aliyun ASR. */
+  aliyunAsrSampleRate: number
   /** Public dashboard origin used by Telegram Mini Apps and remote browsers. */
   publicDashboardUrl: string
   /** Local device label shown when the Harness bridge checks in. */

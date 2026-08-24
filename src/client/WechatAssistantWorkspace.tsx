@@ -54,36 +54,6 @@ type Props = PropsRuntime<'shell.overlay'>
   & InjectFace<WechatAssistantWorkspaceInjected>
   & PropsLocale<'a2a-assistant'>
 
-interface SpeechRecognitionResultLike {
-  readonly isFinal: boolean
-  readonly 0: { readonly transcript: string }
-}
-
-interface SpeechRecognitionEventLike {
-  readonly resultIndex: number
-  readonly results: ArrayLike<SpeechRecognitionResultLike>
-}
-
-interface SpeechRecognitionErrorEventLike {
-  readonly error?: string
-}
-
-interface SpeechRecognitionLike {
-  continuous: boolean
-  interimResults: boolean
-  lang: string
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null
-  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null
-  onend: (() => void) | null
-  start(): void
-  stop(): void
-}
-
-interface VoiceWindow extends Window {
-  SpeechRecognition?: new () => SpeechRecognitionLike
-  webkitSpeechRecognition?: new () => SpeechRecognitionLike
-}
-
 const DEFINITIONS: readonly ConversationDefinition[] = [
   { id: 'self', nameKey: 'conversation.self', subtitleKey: 'conversation.self.subtitle', role: 'bot' },
   { id: 'teacher', nameKey: 'conversation.teacher', subtitleKey: 'conversation.teacher.subtitle', role: 'teacher' },
@@ -96,6 +66,10 @@ const STORAGE_KEY = 'dsh.wechat-assistant.beta.minimax'
 const LEGACY_STORAGE_KEYS = ['dsh.wechat-assistant.beta'] as const
 const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
 const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
+const SECRETARY_ASR_PATH = '/api/wechat-assistant/asr'
+const SECRETARY_ASR_SAMPLE_RATE = 16_000
+const SECRETARY_VOICE_THRESHOLD = 0.022
+const SECRETARY_PREFIX_MS = 450
 
 function loadMessages(): ConversationMessages {
   for (const key of LEGACY_STORAGE_KEYS) localStorage.removeItem(key)
@@ -118,6 +92,60 @@ function assistantText(blocks: readonly { readonly kind: string; readonly text?:
 
 function formatTime(value: number): string {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function rms(samples: Float32Array): number {
+  let sum = 0
+  for (const sample of samples) sum += sample * sample
+  return Math.sqrt(sum / samples.length)
+}
+
+function downsampleToPcm16(input: Float32Array, inputSampleRate: number, outputSampleRate: number): Int16Array {
+  const ratio = inputSampleRate / outputSampleRate
+  const outputLength = Math.max(1, Math.floor(input.length / ratio))
+  const output = new Int16Array(outputLength)
+  for (let index = 0; index < outputLength; index += 1) {
+    const start = Math.floor(index * ratio)
+    const end = Math.min(input.length, Math.floor((index + 1) * ratio))
+    let sum = 0
+    for (let inputIndex = start; inputIndex < end; inputIndex += 1) sum += input[inputIndex] ?? 0
+    const sample = Math.max(-1, Math.min(1, sum / Math.max(1, end - start)))
+    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
+  }
+  return output
+}
+
+function readAsrTranscript(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { readonly status?: unknown; readonly result?: unknown; readonly Result?: unknown }
+    const result = typeof parsed.result === 'string' ? parsed.result : parsed.Result
+    return typeof result === 'string' ? result.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+function readAsrError(body: string, status: number): string {
+  try {
+    const parsed = JSON.parse(body) as { readonly message?: unknown; readonly status_text?: unknown; readonly status?: unknown }
+    const message = typeof parsed.message === 'string'
+      ? parsed.message
+      : typeof parsed.status_text === 'string'
+        ? parsed.status_text
+        : undefined
+    return message ?? `Aliyun ASR failed (${String(status)})`
+  } catch {
+    return body.trim() || `Aliyun ASR failed (${String(status)})`
+  }
+}
+
+function base64FromBytes(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+  }
+  return btoa(binary)
 }
 
 function definitionOf<T extends ConversationDefinition>(definitions: readonly T[], id: ConversationId): T {
@@ -173,8 +201,17 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   const rootRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const remoteAudioRef = useRef<HTMLAudioElement>(null)
-  const recognition = useRef<SpeechRecognitionLike | null>(null)
   const microphoneStream = useRef<MediaStream | null>(null)
+  const secretaryAudioContext = useRef<AudioContext | null>(null)
+  const secretarySource = useRef<MediaStreamAudioSourceNode | null>(null)
+  const secretaryProcessor = useRef<ScriptProcessorNode | null>(null)
+  const secretarySilentOutput = useRef<GainNode | null>(null)
+  const secretaryRecording = useRef(false)
+  const secretaryChunks = useRef<Int16Array[]>([])
+  const secretaryPrefix = useRef<Int16Array[]>([])
+  const secretaryPrefixSamples = useRef(0)
+  const secretarySilentSince = useRef<number | undefined>(undefined)
+  const secretarySubmitting = useRef(false)
   const recognitionPaused = useRef(false)
   const realtimeCall = useRef<OpenAIRealtimeCall | null>(null)
   const speechPlayer = useRef<SpeechPlayer | null>(null)
@@ -359,7 +396,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   }, [open, send, sessionId, settingsSnapshot.value?.bridgePollIntervalMs, snapshot?.running])
 
   useEffect(() => () => {
-    recognition.current?.stop()
+    stopSecretaryCapture()
     realtimeCall.current?.stop()
     speechPlayer.current?.stop()
   }, [])
@@ -406,14 +443,76 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     void submit(text)
   }
 
-  function scheduleVoiceSubmit(raw: string): void {
-    const text = raw.trim()
-    if (text === '') return
-    pendingVoiceText.current = text
-    if (voiceSubmitTimer.current !== undefined) window.clearTimeout(voiceSubmitTimer.current)
-    voiceSubmitTimer.current = window.setTimeout(() => {
-      submitVoiceTranscript(pendingVoiceText.current)
-    }, voiceSilenceMs.current)
+  function resetSecretarySegment(): void {
+    secretaryRecording.current = false
+    secretaryChunks.current = []
+    secretarySilentSince.current = undefined
+  }
+
+  function resetSecretaryPrefix(): void {
+    secretaryPrefix.current = []
+    secretaryPrefixSamples.current = 0
+  }
+
+  function appendSecretaryPrefix(chunk: Int16Array): void {
+    secretaryPrefix.current.push(chunk)
+    secretaryPrefixSamples.current += chunk.length
+    const maxSamples = Math.round((settingsSnapshot.value?.aliyunAsrSampleRate ?? SECRETARY_ASR_SAMPLE_RATE) * SECRETARY_PREFIX_MS / 1000)
+    while (secretaryPrefixSamples.current > maxSamples && secretaryPrefix.current.length > 0) {
+      const removed = secretaryPrefix.current.shift()
+      secretaryPrefixSamples.current -= removed?.length ?? 0
+    }
+  }
+
+  function stopSecretaryCapture(): void {
+    secretaryProcessor.current?.disconnect()
+    secretaryProcessor.current = null
+    secretarySource.current?.disconnect()
+    secretarySource.current = null
+    secretarySilentOutput.current?.disconnect()
+    secretarySilentOutput.current = null
+    void secretaryAudioContext.current?.close().catch(() => {})
+    secretaryAudioContext.current = null
+    resetSecretarySegment()
+    resetSecretaryPrefix()
+  }
+
+  function finishSecretarySegment(): void {
+    const chunks = secretaryChunks.current
+    const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+    resetSecretarySegment()
+    resetSecretaryPrefix()
+    setAudioLevel(0)
+    setLiveUserActive(false)
+    if (total < Math.round((settingsSnapshot.value?.aliyunAsrSampleRate ?? SECRETARY_ASR_SAMPLE_RATE) * 0.35)) return
+    const bytes = new Uint8Array(total * 2)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), offset)
+      offset += chunk.byteLength
+    }
+    void submitSecretaryAudio(bytes)
+  }
+
+  async function submitSecretaryAudio(audio: Uint8Array): Promise<void> {
+    if (secretarySubmitting.current) return
+    secretarySubmitting.current = true
+    setVoiceError(null)
+    try {
+      const response = await fetch(SECRETARY_ASR_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ audio: base64FromBytes(audio) }),
+      })
+      const body = await response.text()
+      if (!response.ok) throw new Error(readAsrError(body, response.status))
+      const transcript = readAsrTranscript(body)
+      if (transcript !== '') submitVoiceTranscript(transcript)
+    } catch (failure) {
+      setVoiceError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      secretarySubmitting.current = false
+    }
   }
 
   async function submit(raw: string): Promise<void> {
@@ -455,8 +554,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
 
   const stopCall = (): void => {
     clearPendingVoiceSubmit()
-    recognition.current?.stop()
-    recognition.current = null
+    stopSecretaryCapture()
     microphoneStream.current?.getTracks().forEach(track => { track.stop() })
     microphoneStream.current = null
     speechSeq.current += 1
@@ -475,10 +573,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     setCalling(false)
   }
 
-  const startBrowserCall = async (): Promise<void> => {
-    const voiceWindow = window as VoiceWindow
-    const Constructor = voiceWindow.SpeechRecognition ?? voiceWindow.webkitSpeechRecognition
-    if (Constructor === undefined) { setVoiceError(t('call.unsupported')); return }
+  const startSecretaryCall = async (): Promise<void> => {
     setVoiceError(null)
     bindRemoteAudio(null)
     try {
@@ -492,53 +587,72 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       stopCall()
       return
     }
-    const engine = new Constructor()
     clearPendingVoiceSubmit()
+    stopSecretaryCapture()
     lastVoiceSubmission.current = undefined
-    engine.continuous = true
-    engine.interimResults = true
-    engine.lang = navigator.language.startsWith('zh') ? 'zh-CN' : navigator.language
-    engine.onresult = (event) => {
+    resetSecretarySegment()
+    resetSecretaryPrefix()
+    const audioContext = new AudioContext()
+    const source = audioContext.createMediaStreamSource(microphoneStream.current)
+    const processor = audioContext.createScriptProcessor(4096, 1, 1)
+    const silentOutput = audioContext.createGain()
+    silentOutput.gain.value = 0
+    processor.onaudioprocess = (event) => {
       if (recognitionPaused.current) return
-      let interim = ''
-      let final = ''
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index]
-        if (result?.isFinal === true) {
-          final += result[0].transcript
-        } else if (result !== undefined) {
-          interim += result[0].transcript
-        }
-      }
-      if (final !== '') {
-        submitVoiceTranscript(final)
-        return
-      }
-      if (interim !== '') {
-        setLiveUserText(interim)
-        setLiveUserActive(true)
-        scheduleVoiceSubmit(interim)
-      }
+      handleSecretaryAudio(event.inputBuffer.getChannelData(0), audioContext.sampleRate)
     }
-    engine.onerror = (event) => {
-      const detail = event.error === undefined ? '' : `: ${event.error}`
-      setVoiceError(`${t('call.permission')}${detail}`)
-      stopCall()
-    }
-    engine.onend = () => {
-      if (recognition.current === engine && !recognitionPaused.current) {
-        try { engine.start() } catch { stopCall() }
-      }
-    }
-    recognition.current = engine
+    source.connect(processor)
+    processor.connect(silentOutput)
+    silentOutput.connect(audioContext.destination)
+    secretaryAudioContext.current = audioContext
+    secretarySource.current = source
+    secretaryProcessor.current = processor
+    secretarySilentOutput.current = silentOutput
     recognitionPaused.current = false
     setCallPaused(false)
     setCallState('connected')
     setCalling(true)
-    try { engine.start() } catch (failure) {
+  }
+
+  function handleSecretaryAudio(input: Float32Array, inputSampleRate: number): void {
+    const targetRate = settingsSnapshot.value?.aliyunAsrSampleRate ?? SECRETARY_ASR_SAMPLE_RATE
+    const chunk = downsampleToPcm16(input, inputSampleRate, targetRate)
+    const level = rms(input)
+    setAudioLevel(level)
+    if (level >= SECRETARY_VOICE_THRESHOLD) {
+      setLiveUserActive(true)
+      setLiveUserText('')
+      if (!secretaryRecording.current) {
+        secretaryRecording.current = true
+        secretaryChunks.current = [...secretaryPrefix.current, chunk]
+      } else {
+        secretaryChunks.current.push(chunk)
+      }
+      secretarySilentSince.current = undefined
+      return
+    }
+    if (!secretaryRecording.current) {
+      appendSecretaryPrefix(chunk)
+      setLiveUserActive(false)
+      return
+    }
+    secretaryChunks.current.push(chunk)
+    const now = Date.now()
+    secretarySilentSince.current ??= now
+    if (now - secretarySilentSince.current >= voiceSilenceMs.current) finishSecretarySegment()
+  }
+
+  const ensureSecretaryAudioContext = async (): Promise<void> => {
+    if (secretaryAudioContext.current?.state === 'suspended') {
+      await secretaryAudioContext.current.resume()
+    }
+  }
+
+  const recoverSecretaryAudioContext = (): void => {
+    void ensureSecretaryAudioContext().catch((failure) => {
       setVoiceError(failure instanceof Error ? `${t('call.permission')}: ${failure.message}` : t('call.permission'))
       stopCall()
-    }
+    })
   }
 
   const startRealtimeCall = async (): Promise<void> => {
@@ -600,7 +714,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
 
   const startCall = (): void => {
     if (conversation === 'chatgpt') void startRealtimeCall()
-    else void startBrowserCall()
+    else void startSecretaryCall()
   }
 
   const togglePause = (): void => {
@@ -617,14 +731,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
       realtimeCall.current?.setMuted(next)
       return
     }
-    const engine = recognition.current
-    if (engine === null) return
-    try {
-      if (next) engine.stop()
-      else engine.start()
-    } catch {
-      setVoiceError(t('call.permission'))
-    }
+    if (!next) recoverSecretaryAudioContext()
   }
 
   const selectConversation = (id: ConversationId): void => {
@@ -698,7 +805,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
             {activeMessages.map(message => (
               <MessageRow key={message.id} message={message} agentRole={active.role} agentName={active.name} t={t} />
             ))}
-            {calling && conversation === 'chatgpt' && (liveUserActive || liveUserText !== '') && (
+            {calling && (liveUserActive || liveUserText !== '') && (
               <LiveVoiceRow mine text={liveUserText} level={audioLevel} agentRole={active.role} agentName={active.name} t={t} />
             )}
             {calling && conversation === 'chatgpt' && liveAssistantText !== '' && (
