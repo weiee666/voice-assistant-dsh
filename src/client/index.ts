@@ -45,6 +45,8 @@ function promptFor(conversation: ConversationId, text: string): string {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-a2a-assistant: dictionaries')
   const workspace = new WechatAssistantWorkspaceStore()
+  const params = new URLSearchParams(window.location.search)
+  if (params.get('wechatAssistant') === '1') workspace.setOpen(true)
   const settingsScope = ctx.settingsScope.bind<AssistantSettings>({
     namespace: A2A_ASSISTANT_SETTINGS_NAMESPACE,
   })
