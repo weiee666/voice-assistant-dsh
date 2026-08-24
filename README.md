@@ -18,7 +18,7 @@ dsh plugin --profile web update @deepseek-ai/dsh-client-ui-a2a-assistant
 dsh web --no-open
 ```
 
-Restart the web profile after adding or updating the bundle. Vercel should point at `apps/public-dashboard` when the public dashboard is enabled; that deployment is only the remote page and relay, while Telegram polling, model credentials, local files, and Agent execution stay on the local Harness host.
+Restart the web profile after adding or updating the bundle. Vercel points at `apps/public-dashboard`; the deployment first hosts the public entry page and can later host the relay. Telegram polling, model credentials, local files, and Agent execution stay on the local Harness host.
 
 This browser plugin adds a `WeChat Assistant (beta)` action immediately above Settings in the Harness sidebar. The action opens an application-level workspace over the center and details columns while leaving the Harness sidebar available. It is independent of the selected Session's Chat and Trajectory tabs; selecting another sidebar destination closes the workspace.
 
@@ -32,7 +32,11 @@ ChatGPT uses a separate OpenAI Realtime WebRTC call. The Harness Host resolves `
 
 Settings includes a dedicated **WeChat Assistant** page. Its write-only API-key fields report only configured state and write through the Harness credentials domain; they never read stored literals. The same page edits the Realtime model, voice, transcription model, system instructions, shared voice silence window, and MiniMax speech options. These settings are live and apply to the next call or speech request without restarting Harness.
 
-The same settings page now reserves the public-dashboard and channel bridge settings for the next increment. `publicDashboardUrl` points at the Vercel deployment that hosts the remote WeChat Assistant page. `bridgeDeviceName` and `bridgePollIntervalMs` identify the local Harness bridge that will poll the public relay and execute commands on this device. `telegramBotTokenEnv` is a write-only credential reference for Telegram Bot API polling, and `telegramAllowedUserIds` limits which Telegram accounts may reach the Secretary. Vercel is the public page and relay only; local file access, model credentials, Telegram polling, and Agent execution stay on the running Harness host.
+The same settings page includes public-dashboard and channel bridge settings. `publicDashboardUrl` points at the Vercel deployment that hosts the remote WeChat Assistant page. When a Telegram user sends `看板`, `dashboard`, or `/dashboard`, the Secretary replies with this URL; if it is empty, the bot asks the user to configure the public dashboard URL first. `bridgeDeviceName` and `bridgePollIntervalMs` identify the local Harness bridge. `telegramBotTokenEnv` is a write-only credential reference for Telegram Bot API polling, and `telegramAllowedUserIds` limits which Telegram accounts may reach the Secretary.
+
+The Telegram Secretary bridge now runs on the Host side. Local Harness actively polls the Telegram Bot API, so Telegram does not need public access to local port 3080. Ordinary Telegram text enters the Secretary conversation and appears in the dashboard; the dashboard submits that message to the selected Harness Session, then sends the Harness assistant reply back to the same Telegram chat. This MVP still reuses the currently selected Session. A dedicated per-user Secretary Session and a public relay queue remain deferred.
+
+The root `vercel.json` builds `apps/public-dashboard` and serves `apps/public-dashboard/dist`. Vercel cannot directly expose `127.0.0.1:3080` from your laptop as a public service; it can host the public frontend or relay. Remote-page control of local files still requires the local DSH process to stay online and actively poll a relay or Telegram.
 
 ## Model Experience
 
@@ -59,4 +63,4 @@ The prefix is appended with the new user message and does not modify earlier req
 - **Realtime text requires an active call** — the first integration keeps typed and spoken ChatGPT turns in one WebRTC session rather than creating a second REST conversation.
 - **Realtime history is currently browser-local** — transcripts are not yet projected into Harness Session events and clearing site data removes them.
 - **Browser transcript state is disposable** — clearing site data removes the workspace grouping but does not remove Harness logs.
-- **The public dashboard bridge is configuration-only** — Vercel deployment, relay polling, and Telegram polling are reserved by settings but not yet started by this package.
+- **The public relay is not implemented yet** — the Vercel entry page has deployment configuration, and Telegram polling now runs in the local Host; the remote-page-to-local relay queue remains deferred.

@@ -1,0 +1,4 @@
+{
+  "buildCommand": "cd apps/public-dashboard && npm install && npm run build",
+  "outputDirectory": "apps/public-dashboard/dist"
+}

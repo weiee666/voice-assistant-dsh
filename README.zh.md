@@ -18,7 +18,7 @@ dsh plugin --profile web update @deepseek-ai/dsh-client-ui-a2a-assistant
 dsh web --no-open
 ```
 
-添加或更新 bundle 后需要重启 web profile。Vercel 后续指向 `apps/public-dashboard`；它只负责公网页面和 relay，本地文件、模型凭据、Telegram polling 和 Agent 执行仍由本机 Harness Host 负责。
+添加或更新 bundle 后需要重启 web profile。Vercel 指向 `apps/public-dashboard`；它先负责公网入口页，后续再承载 relay。本地文件、模型凭据、Telegram polling 和 Agent 执行仍由本机 Harness Host 负责。
 
 这个浏览器插件在 Harness 侧栏的“设置”上方增加 `微信助手（beta）` 操作。点击后，应用级工作区覆盖中间会话列与右侧详情列，同时保留 Harness 全局侧栏。该页面不属于所选 Session 的“对话／轨迹”页签；选择侧栏里的其他目标会关闭微信助手。
 
@@ -32,7 +32,11 @@ ChatGPT 使用独立的 OpenAI Realtime WebRTC 通话。Harness Host 解析 `OPE
 
 “设置”中包含独立的“微信助手”页面。API key 输入框只写不读，仅显示是否已配置，并通过 Harness 凭据域保存，不会读取已保存的原值。同一页面可修改 Realtime 模型、音色、转录模型、系统提示词、统一语音停顿判定时间和 MiniMax 朗读选项；这些设置实时生效，下一通电话或朗读请求会直接使用，无需重启 Harness。
 
-同一个设置页为下一阶段保留公网看板与通道 Bridge 设置。`publicDashboardUrl` 指向承载远程微信助手页面的 Vercel 部署。`bridgeDeviceName` 与 `bridgePollIntervalMs` 标识本机 Harness Bridge，后者会轮询公网 relay 并在本机执行命令。`telegramBotTokenEnv` 是 Telegram Bot API polling 使用的只写凭据引用，`telegramAllowedUserIds` 限定哪些 Telegram 账号可以进入秘书会话。Vercel 只作为公网页面和 relay；本地文件访问、模型凭据、Telegram polling 和 Agent 执行仍留在运行中的 Harness Host。
+同一个设置页包含公网看板与通道 Bridge 设置。`publicDashboardUrl` 指向承载远程微信助手页面的 Vercel 部署；Telegram 中发送“看板”、`dashboard` 或 `/dashboard` 时，秘书会返回这个地址，未配置时会提示先填写公网看板地址。`bridgeDeviceName` 与 `bridgePollIntervalMs` 标识本机 Harness Bridge。`telegramBotTokenEnv` 是 Telegram Bot API polling 使用的只写凭据引用，`telegramAllowedUserIds` 限定哪些 Telegram 账号可以进入秘书会话。
+
+Telegram 秘书桥已在 Host 侧启动。本机 Harness 会主动 polling Telegram Bot API，所以不需要 Telegram 从公网访问本机 3080。普通 Telegram 文字会进入“秘书”会话并出现在看板；当前看板会把这条消息送入所选 Harness Session，收到 Harness 助手回复后再通过 Telegram Bot 发回同一个 chat。这个 MVP 仍复用当前选中的 Session，独立的每用户秘书 Session 和公网 relay 队列会在后续版本补上。
+
+Vercel 部署配置在仓库根目录的 `vercel.json`，会构建 `apps/public-dashboard` 并输出 `apps/public-dashboard/dist`。Vercel 不能直接把你本机的 `127.0.0.1:3080` 变成公网服务；它只能承载公网前端或 relay。需要远程页面控制本机时，本机 DSH 仍要在线，并由本机插件主动轮询 relay 或 Telegram。
 
 ## 模型体验
 
@@ -59,4 +63,4 @@ ChatGPT 使用独立的 OpenAI Realtime WebRTC 通话。Harness Host 解析 `OPE
 - **Realtime 文字需要通话处于连接状态**：第一版把打字和说话保留在同一段 WebRTC 会话中，不另建 REST 对话。
 - **Realtime 历史目前保存在浏览器本地**：转写尚未投影为 Harness Session 事件，清除站点数据会删除记录。
 - **浏览器消息状态可丢弃**：清除站点数据会删除工作区分组，但不会删除 Harness 日志。
-- **公网看板 Bridge 仍是配置骨架**：Vercel 部署、relay 轮询和 Telegram polling 已有设置落点，但本包尚未启动这些后台连接。
+- **公网 relay 尚未实现**：Vercel 入口页已有部署配置，Telegram polling 已在本机 Host 启动；远程页面到本机的 relay 队列仍待实现。
