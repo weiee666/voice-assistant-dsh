@@ -46,7 +46,7 @@ export declare const zh: {
     readonly 'status.offline': "未连接";
     readonly 'status.currentSession': "使用当前 Harness Session";
     readonly 'status.noSession': "未选择 Harness Session";
-    readonly 'status.noSessionError': "请先在左侧选择一个 Harness Session";
+    readonly 'status.noSessionError': "没有可用的 Harness Session，请先在本机创建一个会话";
     readonly 'status.sending': "正在回复";
     readonly 'status.failed': "发送失败";
     readonly 'settings.nav': "微信助手";

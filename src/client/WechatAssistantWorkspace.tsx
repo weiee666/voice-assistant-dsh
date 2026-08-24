@@ -42,6 +42,18 @@ interface ConversationDefinition {
   readonly role: AvatarRole
 }
 
+interface SessionListSnapshot {
+  readonly ids: readonly SessionId[]
+  readonly byId: Readonly<Record<SessionId, {
+    readonly id: SessionId
+    readonly blank: boolean
+    readonly updatedAt: number
+  } | undefined>>
+  readonly current: SessionId | undefined
+}
+
+type AssistantSessionSummary = NonNullable<SessionListSnapshot['byId'][SessionId]>
+
 /** Application-page operations supplied by the browser plugin. */
 export interface WechatAssistantWorkspaceInjected {
   readonly workspace: WechatAssistantWorkspaceStore
@@ -175,6 +187,15 @@ function definitionOf<T extends ConversationDefinition>(definitions: readonly T[
   return definition
 }
 
+function fallbackSessionId(snapshot: SessionListSnapshot): SessionId | undefined {
+  if (snapshot.current !== undefined) return snapshot.current
+  const sessions = snapshot.ids
+    .map(id => snapshot.byId[id])
+    .filter((session): session is AssistantSessionSummary => session !== undefined && !session.blank)
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+  return sessions[0]?.id
+}
+
 async function fetchHostMessages(): Promise<readonly AssistantHostMessage[]> {
   const response = await fetch(ASSISTANT_MESSAGES_PATH, { cache: 'no-store' })
   if (!response.ok) throw new Error(`Assistant bridge returned ${response.status}`)
@@ -198,7 +219,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     listener => settings.subscribe(listener),
     () => settings.getSnapshot(),
   )
-  const sessionId = useSessions(snapshot => snapshot.current)
+  const sessionId = useSessions(fallbackSessionId)
   const session = resolveSession(sessionId)
   const subscribeSession = useCallback((listener: () => void) => session?.subscribe(listener) ?? (() => {}), [session])
   const readSession = useCallback(() => session?.getSnapshot(), [session])
