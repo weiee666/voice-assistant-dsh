@@ -127,13 +127,33 @@ function readAsrTranscript(body: string): string {
 
 function readAsrError(body: string, status: number): string {
   try {
-    const parsed = JSON.parse(body) as { readonly message?: unknown; readonly status_text?: unknown; readonly status?: unknown }
+    const parsed = JSON.parse(body) as {
+      readonly message?: unknown
+      readonly Message?: unknown
+      readonly status_text?: unknown
+      readonly error_message?: unknown
+      readonly status?: unknown
+      readonly Code?: unknown
+      readonly code?: unknown
+    }
     const message = typeof parsed.message === 'string'
       ? parsed.message
+      : typeof parsed.Message === 'string'
+        ? parsed.Message
       : typeof parsed.status_text === 'string'
         ? parsed.status_text
+        : typeof parsed.error_message === 'string'
+          ? parsed.error_message
         : undefined
-    return message ?? `Aliyun ASR failed (${String(status)})`
+    const code = typeof parsed.Code === 'string'
+      ? parsed.Code
+      : typeof parsed.code === 'string'
+        ? parsed.code
+        : typeof parsed.status === 'number'
+          ? String(parsed.status)
+          : undefined
+    const detail = [code, message].filter(Boolean).join(': ')
+    return detail === '' ? `Aliyun ASR failed (${String(status)}): ${body}` : `Aliyun ASR failed (${String(status)}): ${detail}`
   } catch {
     return body.trim() || `Aliyun ASR failed (${String(status)})`
   }
