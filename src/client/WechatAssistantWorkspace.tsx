@@ -68,8 +68,9 @@ const ASSISTANT_MESSAGES_PATH = '/api/wechat-assistant/messages'
 const ASSISTANT_REPLIES_PATH = '/api/wechat-assistant/replies'
 const SECRETARY_ASR_PATH = '/api/wechat-assistant/asr'
 const SECRETARY_ASR_SAMPLE_RATE = 16_000
-const SECRETARY_VOICE_THRESHOLD = 0.022
+const SECRETARY_VOICE_THRESHOLD = 0.038
 const SECRETARY_PREFIX_MS = 450
+const SECRETARY_MAX_SEGMENT_MS = 8_000
 
 function loadMessages(): ConversationMessages {
   for (const key of LEGACY_STORAGE_KEYS) localStorage.removeItem(key)
@@ -231,6 +232,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   const secretaryPrefix = useRef<Int16Array[]>([])
   const secretaryPrefixSamples = useRef(0)
   const secretarySilentSince = useRef<number | undefined>(undefined)
+  const secretarySegmentStartedAt = useRef<number | undefined>(undefined)
   const secretarySubmitting = useRef(false)
   const recognitionPaused = useRef(false)
   const realtimeCall = useRef<OpenAIRealtimeCall | null>(null)
@@ -238,7 +240,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
   const speechSeq = useRef(0)
   const voiceSubmitTimer = useRef<number | undefined>(undefined)
   const pendingVoiceText = useRef('')
-  const voiceSilenceMs = useRef(settingsSnapshot.value?.voiceSilenceMs ?? 2800)
+  const voiceSilenceMs = useRef(settingsSnapshot.value?.voiceSilenceMs ?? 1500)
   const lastVoiceSubmission = useRef<{ readonly text: string; readonly time: number } | undefined>()
   const pendingConversation = useRef<ConversationId | null>(null)
   const pendingHostReplyId = useRef<string | null>(null)
@@ -467,6 +469,7 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     secretaryRecording.current = false
     secretaryChunks.current = []
     secretarySilentSince.current = undefined
+    secretarySegmentStartedAt.current = undefined
   }
 
   function resetSecretaryPrefix(): void {
@@ -642,13 +645,18 @@ export function WechatAssistantWorkspace({ useSessions, workspace, settings, res
     if (level >= SECRETARY_VOICE_THRESHOLD) {
       setLiveUserActive(true)
       setLiveUserText('')
+      const now = Date.now()
       if (!secretaryRecording.current) {
         secretaryRecording.current = true
+        secretarySegmentStartedAt.current = now
         secretaryChunks.current = [...secretaryPrefix.current, chunk]
       } else {
         secretaryChunks.current.push(chunk)
       }
       secretarySilentSince.current = undefined
+      if (secretarySegmentStartedAt.current !== undefined && now - secretarySegmentStartedAt.current >= SECRETARY_MAX_SEGMENT_MS) {
+        finishSecretarySegment()
+      }
       return
     }
     if (!secretaryRecording.current) {

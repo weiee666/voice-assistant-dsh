@@ -71,7 +71,7 @@ export declare const zh: {
     readonly 'settings.instructions.label': "ChatGPT 系统提示词";
     readonly 'settings.instructions.required': "ChatGPT 系统提示词不能为空";
     readonly 'settings.voiceSilenceMs.label': "语音停顿判定（毫秒）";
-    readonly 'settings.voiceSilenceMs.hint': "同一套等待时间用于 ChatGPT Realtime 和秘书语音电话。";
+    readonly 'settings.voiceSilenceMs.hint': "同一套等待时间用于 ChatGPT Realtime 和秘书语音电话；走路环境建议 1500 毫秒。";
     readonly 'settings.voiceSilenceMs.required': "语音停顿判定必须至少为 250 毫秒";
     readonly 'settings.minimax.title': "MiniMax 国内语音";
     readonly 'settings.minimax.description': "用于把秘书的 DeepSeek 文字回复交给 MiniMax speech-2.8-turbo 朗读，API Key 只保存在本机。";
