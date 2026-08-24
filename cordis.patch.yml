@@ -1,0 +1,10 @@
+# Voice Assistant (DSH) bundle patch.
+#
+# Install with:
+#   dsh plugin --profile web add github:weiee666/voice-assistant-dsh
+#
+# Restart `dsh web` after adding or updating this bundle.
+
+- insert:
+    - id: ui-a2a-assistant
+      name: '@deepseek-ai/dsh-client-ui-a2a-assistant'
